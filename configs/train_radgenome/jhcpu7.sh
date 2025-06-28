@@ -4,7 +4,7 @@ experiment_name="Reg2RG_radgenome"
 bf16=True
 
 # Device settings
-cuda_devices="0,6"  
+cuda_devices="3,4"  
 
 # Torchrun settings
 master_port=25368
