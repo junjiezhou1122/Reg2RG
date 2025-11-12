@@ -16,7 +16,6 @@ class Reg2RG(nn.Module):
     def __init__(self, text_tokenizer_path, lang_model_path, pretrained_visual_encoder, pretrained_adapter, max_region_size=10, max_img_size = 1, image_num = 32):
         super(Reg2RG, self).__init__()
         # tokenizer
-        self.image_padding_tokens = []
         self.text_tokenizer = LlamaTokenizer.from_pretrained(
             text_tokenizer_path,
         )
@@ -98,20 +97,12 @@ class Reg2RG(nn.Module):
             output = self.lang_model(
                 inputs_embeds=input_embedding, attention_mask=attention_mask, labels=labels)
 
-            logits = output['logits'][..., :-1, :].contiguous().detach()
-            total = len(labels)
-            predictions = torch.argmax(logits, dim=-1)
-            labels = labels[..., 1:].contiguous()
-            Acc = torch.sum(torch.all(torch.logical_or(
-                predictions == labels, labels == -100), dim=-1))
-            Accuracy = Acc / total
-
             # only rank 0 print
             if torch.distributed.get_rank() == 0:
-                print('lm_oss:', output['loss'].item())
+                print('lm_loss:', output['loss'].item())
 
             return dict(
-                logits=Accuracy,
+                logits=output['logits'],
                 loss=output['loss'],
             )
 
