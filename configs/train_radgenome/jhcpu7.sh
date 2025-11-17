@@ -61,4 +61,10 @@ lr_scheduler_type="constant_with_warmup"
 # Number of parallel data-loading worker processes
 dataloader_num_workers=8
 # Log training metrics every N steps
-logging_steps=1
+logging_steps=20
+
+# Weights & Biases settings
+wandb_project="Reg2RG"
+wandb_entity="junjiezhou1122"          # optional: set your W&B username or team
+wandb_mode="online"      # or \"offline\" / \"disabled\"
+report_to="wandb"

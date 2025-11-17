@@ -16,6 +16,15 @@ script_name=$(basename "$0" .sh)
 # 导入配置文件
 source "../configs/${script_name}/${config_file}.sh"
 
+# 设置 W&B 环境变量（如果配置中提供）
+export WANDB_PROJECT=${wandb_project:-Reg2RG}
+if [ -n "${wandb_entity}" ]; then
+    export WANDB_ENTITY="${wandb_entity}"
+fi
+if [ -n "${wandb_mode}" ]; then
+    export WANDB_MODE="${wandb_mode}"
+fi
+
 # 根据 cuda_devices 设置的GPU数量自动设置 nproc_per_node
 nproc_per_node=$(echo $cuda_devices | tr ',' '\n' | wc -l)
 
@@ -44,4 +53,6 @@ CUDA_VISIBLE_DEVICES=$cuda_devices torchrun --nproc_per_node=$nproc_per_node --m
     --lr_scheduler_type "$lr_scheduler_type" \
     --dataloader_num_workers $dataloader_num_workers \
     --run_name "$experiment_name" \
-    --logging_steps $logging_steps
+    --logging_steps $logging_steps \
+    --logging_strategy "steps" \
+    --report_to "$report_to"
