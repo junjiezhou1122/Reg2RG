@@ -2,19 +2,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 from .helpers import PerceiverResampler
-from .utils import get_visual_encoder
-from einops import rearrange, repeat
-from einops_exts import rearrange_many
-import torchvision
+from einops import rearrange
 from .vit_3d import ViT
-from einops.layers.torch import Rearrange
-from .transformer_decoder import TransformerDecoder, TransformerDecoderLayer
-from torch.utils.checkpoint import checkpoint
-from torch.autograd import Variable
-import random
-from transformers import AutoTokenizer, AutoModel
-from monai.networks.nets.swin_unetr import SwinTransformer
-from .cross_attention import TwoWayTransformer
 
 CONDITIONS = [
     'enlarged cardiomediastinum',

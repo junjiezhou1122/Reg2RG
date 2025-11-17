@@ -72,3 +72,4 @@ def vision_load_pretrain(resnet,model_path):
     state_dict = {k.replace('module.visual.',''): v for k, v in state_dict.items() if '.visual' in k}
     resnet.load_state_dict(state_dict)
     return resnet  
+

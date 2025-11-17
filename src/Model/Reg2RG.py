@@ -2,15 +2,8 @@ from torch import nn
 from transformers.models.llama import LlamaForCausalLM
 from peft import get_peft_model, LoraConfig, TaskType
 from .my_embedding_layer import MyEmbedding
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-import tqdm.auto as tqdm
-import torch.nn as nn
 import torch
-from torch.utils.checkpoint import checkpoint
-from torch.autograd import Variable
-import torch.nn.functional as F
-import numpy as np    
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
+from transformers import LlamaTokenizer
 
 class Reg2RG(nn.Module):
     def __init__(self, text_tokenizer_path, lang_model_path, pretrained_visual_encoder, pretrained_adapter, max_region_size=10, max_img_size = 1, image_num = 32):
