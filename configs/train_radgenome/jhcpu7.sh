@@ -25,7 +25,7 @@ pretrained_visual_encoder="/mnt/home/zhoujunjie/models/Reg2RG/RadFM_vit3d.pth"
 # Adapter (Perceiver/FC) checkpoint that maps vision features to language space
 pretrained_adapter="/mnt/home/zhoujunjie/models/Reg2RG/RadFM_perceiver_fc.pth"
 # Folder with preprocessed training CT volumes
-ddata_folder='/mnt2/ct/RadGenome-ChestCT/dataset/train_preprocessed'
+data_folder='/mnt2/ct/RadGenome-ChestCT/dataset/train_preprocessed'
 # Folder with region masks aligned to the CT volumes
 mask_folder='/mnt2/ct/RadGenome-ChestCT/dataset/train_region_mask'
 # CSV file that holds region-level training sentences
@@ -62,4 +62,3 @@ lr_scheduler_type="constant_with_warmup"
 dataloader_num_workers=8
 # Log training metrics every N steps
 logging_steps=1
-
