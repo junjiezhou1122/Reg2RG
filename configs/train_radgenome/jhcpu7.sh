@@ -17,21 +17,21 @@ master_port=25368
 
 # Paths
 # Path to the LLM weights (e.g., LLaMA-2)
-lang_encoder_path="/jhcnas5/chenzhixuan/checkpoints/Llama-2-7b-chat-hf"
+lang_encoder_path="/mnt/home/zhoujunjie/models/Llama-2-7b-chat-hf"
 # Path to the tokenizer files (often same directory as the LLM)
-tokenizer_path="/jhcnas5/chenzhixuan/checkpoints/Llama-2-7b-chat-hf"
+tokenizer_path="/mnt/home/zhoujunjie/models/Llama-2-7b-chat-hf"
 # Pretrained 3D vision encoder checkpoint (for CT volumes)
-pretrained_visual_encoder="/jhcnas5/chenzhixuan/MyOpenSource/huggingface/Reg2RG/RadFM_vit3d.pth"
+pretrained_visual_encoder="/mnt/home/zhoujunjie/models/Reg2RG/RadFM_vit3d.pth"
 # Adapter (Perceiver/FC) checkpoint that maps vision features to language space
-pretrained_adapter="/jhcnas5/chenzhixuan/MyOpenSource/huggingface/Reg2RG/RadFM_perceiver_fc.pth"
+pretrained_adapter="/mnt/home/zhoujunjie/models/Reg2RG/RadFM_perceiver_fc.pth"
 # Folder with preprocessed training CT volumes
-data_folder='/data/chenzhixuan/data/RadGenome-ChestCT/dataset/train_preprocessed'
+ddata_folder='/mnt2/ct/RadGenome-ChestCT/dataset/train_preprocessed'
 # Folder with region masks aligned to the CT volumes
-mask_folder='/data/chenzhixuan/data/RadGenome-ChestCT/dataset/train_region_mask'
+mask_folder='/mnt2/ct/RadGenome-ChestCT/dataset/train_region_mask'
 # CSV file that holds region-level training sentences
-report_file='/data/chenzhixuan/data/RadGenome-ChestCT/dataset/radgenome_files/train_region_report.csv'
+report_file='/mnt2/ct/RadGenome-ChestCT/dataset/radgenome_files/train_region_report.csv'
 # Optional cache directory for MONAI transforms (not used by this script)
-monai_cache_dir='/jhcnas5/chenzhixuan/data/RadGenome-ChestCT/cache' # not used here
+monai_cache_dir='/mnt2/ct/RadGenome-ChestCT/cache' # not used here
 # Where to save checkpoints and logs for this experiment
 output_dir="/jhcnas5/chenzhixuan/checkpoints/Reg2RG/outputs/$experiment_name"
 # DeepSpeed config file for memory/throughput optimizations
