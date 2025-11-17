@@ -33,7 +33,7 @@ report_file='/mnt2/ct/RadGenome-ChestCT/dataset/radgenome_files/train_region_rep
 # Optional cache directory for MONAI transforms (not used by this script)
 monai_cache_dir='/mnt2/ct/RadGenome-ChestCT/cache' # not used here
 # Where to save checkpoints and logs for this experiment
-output_dir="/jhcnas5/chenzhixuan/checkpoints/Reg2RG/outputs/$experiment_name"
+output_dir="/mnt/home/zhoujunjie/Reg2RG/outputs/$experiment_name"
 # DeepSpeed config file for memory/throughput optimizations
 deepspeed_config="/home/chenzhixuan/Workspace/Reg2RG/ds_configs/stage2.json"
 
