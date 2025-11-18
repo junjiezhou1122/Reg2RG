@@ -65,6 +65,6 @@ logging_steps=1
 
 # Weights & Biases settings
 wandb_project="Reg2RG"
-wandb_entity="junjiezhou1122"          # optional: set your W&B username or team
+wandb_entity="junjiezhou1122-hangzhou-dianzi-university"          # W&B team/entity slug
 wandb_mode="online"      # or \"offline\" / \"disabled\"
 report_to="wandb"
