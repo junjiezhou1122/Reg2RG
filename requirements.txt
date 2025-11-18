@@ -71,7 +71,7 @@ distlib==0.3.8
 distro==1.9.0
 docker-pycreds==0.4.0
 docutils==0.16
--e git+https://github.com/zhaoziheng/SAT.git@ab2792b10efdd4e488129303bcb67812802ce050#egg=dynamic_network_architectures&subdirectory=model/dynamic-network-architectures-main
+-e git+https://gh.llkk.cc/https://github.com/zhaoziheng/SAT.git@ab2792b10efdd4e488129303bcb67812802ce050#egg=dynamic_network_architectures&subdirectory=model/dynamic-network-architectures-main
 easydict==1.9
 editor==1.6.6
 einops==0.8.0
