@@ -170,6 +170,8 @@ class RadGenomeDataset_Train(PersistentDataset):
                             # NOTE: only use the samples with the corresponding region report
                             if region in self.accession_to_sentences[accession_number]:
                                 mask_file = os.path.join(mask_path, region + '.nii.gz')
+                                if not os.path.exists(mask_file):
+                                    continue
                                 region_report = self.accession_to_sentences[accession_number][region]
                                 single_sample[region] = [mask_file, region_report]
                                 flag = True
