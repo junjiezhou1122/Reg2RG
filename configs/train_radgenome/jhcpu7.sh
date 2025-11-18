@@ -61,7 +61,7 @@ lr_scheduler_type="constant_with_warmup"
 # Number of parallel data-loading worker processes
 dataloader_num_workers=8
 # Log training metrics every N steps
-logging_steps=20
+logging_steps=1
 
 # Weights & Biases settings
 wandb_project="Reg2RG"
