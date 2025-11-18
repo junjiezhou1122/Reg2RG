@@ -13,8 +13,12 @@ config_file="$1"
 # 获取当前脚本名称
 script_name=$(basename "$0" .sh)
 
-# 导入配置文件
-source "../configs/${script_name}/${config_file}.sh"
+# 计算脚本所在目录和项目根目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# 导入配置文件（始终相对于项目根目录）
+source "${PROJECT_ROOT}/configs/${script_name}/${config_file}.sh"
 
 # 设置 W&B 环境变量（如果配置中提供）
 export WANDB_PROJECT=${wandb_project:-Reg2RG}
@@ -28,8 +32,8 @@ fi
 # 根据 cuda_devices 设置的GPU数量自动设置 nproc_per_node
 nproc_per_node=$(echo $cuda_devices | tr ',' '\n' | wc -l)
 
-# 使用配置参数执行训练
-CUDA_VISIBLE_DEVICES=$cuda_devices torchrun --nproc_per_node=$nproc_per_node --master-port=$master_port  ../src/${script_name}.py \
+# 使用配置参数执行训练（始终相对于项目根目录）
+CUDA_VISIBLE_DEVICES=$cuda_devices torchrun --nproc_per_node=$nproc_per_node --master-port=$master_port  "${PROJECT_ROOT}/src/${script_name}.py" \
     --bf16 $bf16 \
     --lang_encoder_path "$lang_encoder_path" \
     --tokenizer_path "$tokenizer_path" \
