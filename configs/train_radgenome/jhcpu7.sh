@@ -9,7 +9,7 @@ bf16=True
 
 # Device settings
 # Which GPUs to use (comma-separated IDs). Example: 0,1 uses GPU 0 and 1
-cuda_devices="0,1"  
+cuda_devices="2,3"  
 
 # Torchrun settings
 # A free TCP port that worker processes use to communicate
