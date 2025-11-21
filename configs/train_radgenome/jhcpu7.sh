@@ -59,7 +59,7 @@ warmup_steps=20
 # Learning rate schedule: warmup then keep constant
 lr_scheduler_type="constant_with_warmup"
 # Number of parallel data-loading worker processes
-dataloader_num_workers=4
+dataloader_num_workers=6
 # Log training metrics every N steps
 logging_steps=1
 
