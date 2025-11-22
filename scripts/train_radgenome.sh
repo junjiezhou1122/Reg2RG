@@ -20,6 +20,12 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # 导入配置文件（始终相对于项目根目录）
 source "${PROJECT_ROOT}/configs/${script_name}/${config_file}.sh"
 
+# 可选：如果配置了 resume_from_checkpoint，则从该 checkpoint 继续训练
+resume_args=()
+if [ -n "${resume_from_checkpoint:-}" ]; then
+    resume_args=(--resume_from_checkpoint "$resume_from_checkpoint")
+fi
+
 # 设置 W&B 环境变量（如果配置中提供）
 export WANDB_PROJECT=${wandb_project:-Reg2RG}
 if [ -n "${wandb_entity}" ]; then
@@ -59,4 +65,5 @@ CUDA_VISIBLE_DEVICES=$cuda_devices torchrun --nproc_per_node=$nproc_per_node --m
     --run_name "$experiment_name" \
     --logging_steps $logging_steps \
     --logging_strategy "steps" \
-    --report_to "$report_to"
+    --report_to "$report_to" \
+    "${resume_args[@]}"

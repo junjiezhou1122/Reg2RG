@@ -34,6 +34,9 @@ report_file='/mnt2/ct/RadGenome-ChestCT/dataset/radgenome_files/train_region_rep
 monai_cache_dir='/mnt2/ct/RadGenome-ChestCT/cache' # not used here
 # Where to save checkpoints and logs for this experiment
 output_dir="/mnt/home/zhoujunjie/Reg2RG/outputs/$experiment_name"
+# (Optional) path to a checkpoint to resume training from
+# Leave empty to start training from scratch
+resume_from_checkpoint="/mnt/home/zhoujunjie/Reg2RG/outputs/Reg2RG_radgenome/checkpoint-0"
 # DeepSpeed config file for memory/throughput optimizations
 deepspeed_config="/mnt/home/zhoujunjie/Reg2RG/ds_configs/stage2.json"
 
