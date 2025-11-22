@@ -41,3 +41,6 @@ class TrainingArguments(transformers.TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
     optim: str = field(default="adamw_torch")
     pin_memory: bool = field(default=True)
+    # Optional path to resume training from a specific checkpoint.
+    # When set, src/train_radgenome.py will call Trainer.train(resume_from_checkpoint=...).
+    resume_from_checkpoint: Optional[str] = field(default=None)

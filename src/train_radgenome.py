@@ -226,7 +226,13 @@ def main():
     )
 
     # Run training according to TrainingArguments (epochs, deepspeed, etc.).
-    trainer.train()
+    # If a checkpoint path is provided, resume from that checkpoint.
+    resume_ckpt = getattr(training_args, "resume_from_checkpoint", None)
+    if resume_ckpt:
+        print(f"Resuming training from checkpoint: {resume_ckpt}")
+        trainer.train(resume_from_checkpoint=resume_ckpt)
+    else:
+        trainer.train()
     # Save the trainer state (useful for resuming/debugging); checkpoints are
     # handled separately according to save_strategy in TrainingArguments.
     trainer.save_state()
