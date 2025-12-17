@@ -27,6 +27,11 @@ from torch import nn  # Neural network modules (Linear, LayerNorm, etc.)
 from torch.utils.data import DataLoader, random_split  # Data loading and splitting utilities
 import transformers  # Hugging Face library for argument parsing
 
+try:
+    from tqdm.auto import tqdm  # type: ignore
+except ImportError:  # pragma: no cover
+    tqdm = None
+
 # Custom dataset for loading RadGenome CT scans and region masks
 from Dataset.radgenome_dataset_train import RadGenomeDataset_Train
 # Perceiver Resampler: compresses variable-length sequences to fixed-length
@@ -206,6 +211,12 @@ class TrainArguments:
 
     # Log training metrics every N steps
     log_every: int = field(default=10)
+
+    # Show tqdm progress bars during train/val loops
+    show_progress: bool = field(
+        default=True,
+        metadata={"help": "Show progress bars for train/val epochs (tqdm)."},
+    )
 
     # Random seed for reproducibility
     seed: int = field(default=42)
@@ -1082,13 +1093,20 @@ def main() -> None:
     global_step = 0
 
     # ===== 14. TRAINING/VALIDATION FUNCTION =====
-    def run_epoch(loader: DataLoader, train: bool) -> Dict[str, float]:
+    def run_epoch(
+        loader: DataLoader,
+        train: bool,
+        split: str,
+        epoch_idx: int,
+    ) -> Dict[str, float]:
         """
         Run one epoch of training or validation.
 
         Args:
             loader: DataLoader (train_loader or val_loader)
             train: True for training mode, False for evaluation mode
+            split: Split name for logging ("train" or "val")
+            epoch_idx: Epoch index (1-based)
 
         Returns:
             Dictionary of aggregated metrics
@@ -1122,7 +1140,17 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)  # set_to_none=True: more memory efficient
 
         # ===== BATCH LOOP =====
-        for step, batch in enumerate(loader):
+        it = loader
+        if train_args.show_progress and tqdm is not None:
+            it = tqdm(
+                loader,
+                total=len(loader),
+                desc=f"[{split}] epoch {epoch_idx}/{train_args.num_train_epochs}",
+                dynamic_ncols=True,
+                leave=False,
+            )
+
+        for step, batch in enumerate(it):
             if train:
                 global_step += 1
 
@@ -1262,6 +1290,21 @@ def main() -> None:
                         step=global_step,
                     )
 
+            if train_args.show_progress and tqdm is not None:
+                running = {
+                    "loss": agg["loss"] / max(1, agg["count"]),
+                    "cos": agg["cos"] / max(1, agg["count"]),
+                    "reg_cos": agg["reg_cos"] / max(1, agg["reg_count"]),
+                }
+                try:
+                    it.set_postfix(
+                        loss=f"{running['loss']:.4f}",
+                        cos=f"{running['cos']:.4f}",
+                        reg_cos=f"{running['reg_cos']:.4f}",
+                    )
+                except Exception:
+                    pass
+
         # ===== FINAL GRADIENT UPDATE =====
         # If there are leftover accumulated gradients at epoch end, update now
         if train and step_in_accum > 0:
@@ -1356,10 +1399,10 @@ def main() -> None:
     # Iterate over epochs (full passes through training data)
     for epoch in range(1, train_args.num_train_epochs + 1):
         # Run one epoch of training
-        train_metrics = run_epoch(train_loader, train=True)
+        train_metrics = run_epoch(train_loader, train=True, split="train", epoch_idx=epoch)
 
         # Run one epoch of validation (no gradient updates)
-        val_metrics = run_epoch(val_loader, train=False)
+        val_metrics = run_epoch(val_loader, train=False, split="val", epoch_idx=epoch)
 
         # Print epoch summary
         print(
