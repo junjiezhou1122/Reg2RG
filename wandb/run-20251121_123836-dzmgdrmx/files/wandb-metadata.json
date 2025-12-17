@@ -1,0 +1,114 @@
+{
+  "os": "Linux-5.15.0-78-generic-x86_64-with-glibc2.31",
+  "python": "CPython 3.9.25",
+  "startedAt": "2025-11-21T04:38:36.142403Z",
+  "args": [
+    "--bf16",
+    "True",
+    "--lang_encoder_path",
+    "/mnt/home/zhoujunjie/models/Llama-2-7b-chat-hf",
+    "--tokenizer_path",
+    "/mnt/home/zhoujunjie/models/Llama-2-7b-chat-hf",
+    "--pretrained_visual_encoder",
+    "/mnt/home/zhoujunjie/models/Reg2RG/RadFM_vit3d.pth",
+    "--pretrained_adapter",
+    "/mnt/home/zhoujunjie/models/Reg2RG/RadFM_perceiver_fc.pth",
+    "--data_folder",
+    "/mnt2/ct/RadGenome-ChestCT/dataset/train_preprocessed",
+    "--mask_folder",
+    "/mnt2/ct/RadGenome-ChestCT/dataset/train_region_mask",
+    "--report_file",
+    "/mnt2/ct/RadGenome-ChestCT/dataset/radgenome_files/train_region_report.csv",
+    "--monai_cache_dir",
+    "/mnt2/ct/RadGenome-ChestCT/cache",
+    "--output_dir",
+    "/mnt/home/zhoujunjie/Reg2RG/outputs/Reg2RG_radgenome",
+    "--deepspeed",
+    "/mnt/home/zhoujunjie/Reg2RG/ds_configs/stage2.json",
+    "--per_device_train_batch_size",
+    "1",
+    "--num_train_epochs",
+    "10",
+    "--gradient_accumulation_steps",
+    "8",
+    "--evaluation_strategy",
+    "no",
+    "--save_strategy",
+    "epoch",
+    "--save_total_limit",
+    "3",
+    "--learning_rate",
+    "5e-5",
+    "--weight_decay",
+    "0.0",
+    "--warmup_steps",
+    "20",
+    "--lr_scheduler_type",
+    "constant_with_warmup",
+    "--dataloader_num_workers",
+    "4",
+    "--run_name",
+    "Reg2RG_radgenome",
+    "--logging_steps",
+    "1",
+    "--logging_strategy",
+    "steps",
+    "--report_to",
+    "wandb"
+  ],
+  "program": "/mnt/home/zhoujunjie/Reg2RG/src/train_radgenome.py",
+  "codePath": "src/train_radgenome.py",
+  "codePathLocal": "src/train_radgenome.py",
+  "git": {
+    "remote": "https://gh.llkk.cc/https://github.com/junjiezhou1122/Reg2RG.git",
+    "commit": "de646ca6cd55a28d72c08fa28869895faeb3c914"
+  },
+  "root": "/mnt/home/zhoujunjie/Reg2RG",
+  "host": "super-Super-Server",
+  "executable": "/mnt/home/zhoujunjie/miniconda3/envs/reg2rg/bin/python3.9",
+  "cpu_count": 32,
+  "cpu_count_logical": 64,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "gpu_count": 4,
+  "disk": {
+    "/": {
+      "total": "982820896768",
+      "used": "905692667904"
+    }
+  },
+  "memory": {
+    "total": "134747009024"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 4090",
+      "memoryTotal": "25757220864",
+      "cudaCores": 16384,
+      "architecture": "Ada",
+      "uuid": "GPU-c9302b6e-ead7-2270-4912-e103a3e1fe27"
+    },
+    {
+      "name": "NVIDIA GeForce RTX 4090",
+      "memoryTotal": "25757220864",
+      "cudaCores": 16384,
+      "architecture": "Ada",
+      "uuid": "GPU-3fac1ae0-4e3b-9741-d96f-8294bca49dc6"
+    },
+    {
+      "name": "NVIDIA GeForce RTX 4090",
+      "memoryTotal": "25757220864",
+      "cudaCores": 16384,
+      "architecture": "Ada",
+      "uuid": "GPU-87281244-bb68-c523-cc5a-0ddb5190292d"
+    },
+    {
+      "name": "NVIDIA GeForce RTX 4090",
+      "memoryTotal": "25757220864",
+      "cudaCores": 16384,
+      "architecture": "Ada",
+      "uuid": "GPU-fc998b2b-4a24-9f94-0c82-62c79cd5f63f"
+    }
+  ],
+  "cudaVersion": "12.8",
+  "writerId": "57hfagazsb17htn7pof66ipj8kd97erd"
+}
