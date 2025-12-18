@@ -1140,7 +1140,12 @@ def main() -> None:
             stop_reason = signal.Signals(signum).name.lower()
         except ValueError:
             stop_reason = f"signal_{signum}"
-        print(f"\n[signal] received {stop_reason}; will save checkpoint and stop...")
+        print(f"\n[signal] received {stop_reason}; saving checkpoint and exiting...")
+
+        # Trigger an exception so we exit promptly even if waiting on DataLoader I/O.
+        if signum == signal.SIGINT:
+            signal.default_int_handler(signum, _frame)  # raises KeyboardInterrupt
+        raise SystemExit(0)
 
     signal.signal(signal.SIGINT, _request_stop)
     signal.signal(signal.SIGTERM, _request_stop)
@@ -1460,59 +1465,59 @@ def main() -> None:
             # Run one epoch of validation (no gradient updates)
             val_metrics = run_epoch(val_loader, train=False, split="val", epoch_idx=epoch)
 
-        # Print epoch summary
-        print(
-            f"[epoch {epoch}] train_cos={train_metrics['cos']:.4f} "
-            f"train_reg_cos={train_metrics['reg_cos']:.4f} "
-            f"val_cos={val_metrics['cos']:.4f} "
-            f"val_reg_cos={val_metrics['reg_cos']:.4f}"
-        )
-
-        # W&B epoch-level logging
-        if wandb_run is not None:
-            wandb_run.log(
-                {
-                    "epoch": epoch,
-                    "train/loss": float(train_metrics["loss"]),
-                    "train/mse": float(train_metrics["mse"]),
-                    "train/cos": float(train_metrics["cos"]),
-                    "train/top1": float(train_metrics["top1"]),
-                    "train/reg_cos": float(train_metrics["reg_cos"]),
-                    "train/reg_top1": float(train_metrics["reg_top1"]),
-                    "val/loss": float(val_metrics["loss"]),
-                    "val/mse": float(val_metrics["mse"]),
-                    "val/cos": float(val_metrics["cos"]),
-                    "val/top1": float(val_metrics["top1"]),
-                    "val/reg_cos": float(val_metrics["reg_cos"]),
-                    "val/reg_top1": float(val_metrics["reg_top1"]),
-                    f"val/{monitor_metric}": float(val_metrics.get(monitor_metric, 0.0)),
-                },
-                step=global_step,
+            # Print epoch summary
+            print(
+                f"[epoch {epoch}] train_cos={train_metrics['cos']:.4f} "
+                f"train_reg_cos={train_metrics['reg_cos']:.4f} "
+                f"val_cos={val_metrics['cos']:.4f} "
+                f"val_reg_cos={val_metrics['reg_cos']:.4f}"
             )
+
+            # W&B epoch-level logging
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "epoch": epoch,
+                        "train/loss": float(train_metrics["loss"]),
+                        "train/mse": float(train_metrics["mse"]),
+                        "train/cos": float(train_metrics["cos"]),
+                        "train/top1": float(train_metrics["top1"]),
+                        "train/reg_cos": float(train_metrics["reg_cos"]),
+                        "train/reg_top1": float(train_metrics["reg_top1"]),
+                        "val/loss": float(val_metrics["loss"]),
+                        "val/mse": float(val_metrics["mse"]),
+                        "val/cos": float(val_metrics["cos"]),
+                        "val/top1": float(val_metrics["top1"]),
+                        "val/reg_cos": float(val_metrics["reg_cos"]),
+                        "val/reg_top1": float(val_metrics["reg_top1"]),
+                        f"val/{monitor_metric}": float(val_metrics.get(monitor_metric, 0.0)),
+                    },
+                    step=global_step,
+                )
 
             # Save best checkpoints (top-k by chosen validation metric)
             maybe_save_topk(epoch, train_metrics, val_metrics)
 
-        # ===== 17. LOG METRICS TO CSV =====
-        # Append mode: add to end of file without overwriting
-        with open(metrics_path, "a", encoding="utf-8") as f:
-            # Write training metrics
-            f.write(
-                f"{epoch},train,{train_metrics['loss']:.6f},"
-                f"{train_metrics['mse']:.6f},{train_metrics['cos']:.6f},"
-                f"{train_metrics['top1']:.6f},{train_metrics['reg_cos']:.6f},"
-                f"{train_metrics['reg_top1']:.6f},{model_args.decode_mode}\n"
-            )
+            # ===== 17. LOG METRICS TO CSV =====
+            # Append mode: add to end of file without overwriting
+            with open(metrics_path, "a", encoding="utf-8") as f:
+                # Write training metrics
+                f.write(
+                    f"{epoch},train,{train_metrics['loss']:.6f},"
+                    f"{train_metrics['mse']:.6f},{train_metrics['cos']:.6f},"
+                    f"{train_metrics['top1']:.6f},{train_metrics['reg_cos']:.6f},"
+                    f"{train_metrics['reg_top1']:.6f},{model_args.decode_mode}\n"
+                )
 
-            # Write validation metrics
-            f.write(
-                f"{epoch},val,{val_metrics['loss']:.6f},"
-                f"{val_metrics['mse']:.6f},{val_metrics['cos']:.6f},"
-                f"{val_metrics['top1']:.6f},{val_metrics['reg_cos']:.6f},"
-                f"{val_metrics['reg_top1']:.6f},{model_args.decode_mode}\n"
-            )
+                # Write validation metrics
+                f.write(
+                    f"{epoch},val,{val_metrics['loss']:.6f},"
+                    f"{val_metrics['mse']:.6f},{val_metrics['cos']:.6f},"
+                    f"{val_metrics['top1']:.6f},{val_metrics['reg_cos']:.6f},"
+                    f"{val_metrics['reg_top1']:.6f},{model_args.decode_mode}\n"
+                )
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         save_interrupt_checkpoint(stop_reason)
     finally:
         if wandb_run is not None:
