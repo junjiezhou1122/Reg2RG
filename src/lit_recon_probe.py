@@ -18,6 +18,8 @@ in the compressed representation.
 # ============================================================================
 
 import os  # Operating system operations (file paths, directory creation)
+import signal  # Handle Ctrl+C / SIGTERM for graceful checkpointing
+import time  # Timestamp for checkpoint filenames
 from dataclasses import dataclass, field  # For creating configuration classes
 from typing import Dict, List, Optional, Tuple  # Type hints for better code documentation
 
@@ -1091,6 +1093,57 @@ def main() -> None:
 
     # Global step counter for logging (increments per training batch)
     global_step = 0
+    current_epoch = 0
+    stop_requested = False
+    stop_reason = "interrupt"
+
+    # Ensure checkpoint directory exists (used for both top-k and interrupt saves).
+    ckpt_dir = os.path.join(train_args.output_dir, train_args.checkpoint_subdir)
+
+    def save_interrupt_checkpoint(reason: str) -> str:
+        """
+        Save a lightweight checkpoint when the run is interrupted.
+
+        Saves decoder + optimizer (decoder-only) so training can be resumed.
+        """
+        os.makedirs(ckpt_dir, exist_ok=True)
+        ts = int(time.time())
+        ckpt_path = os.path.join(
+            ckpt_dir, f"interrupt_epoch={current_epoch:03d}_step={global_step}_{reason}_{ts}.pt"
+        )
+        torch.save(
+            {
+                "epoch": current_epoch,
+                "global_step": global_step,
+                "reason": reason,
+                "decoder_state_dict": model.decoder.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "model_args": vars(model_args),
+                "data_args": vars(data_args),
+                "train_args": vars(train_args),
+            },
+            ckpt_path,
+        )
+        print(f"[ckpt] interrupt checkpoint saved: {ckpt_path}")
+        return ckpt_path
+
+    def _request_stop(signum, _frame) -> None:
+        """
+        Request a graceful stop on SIGINT/SIGTERM.
+
+        We avoid heavy I/O directly inside the signal handler; the training loop
+        will save and exit at the next safe point.
+        """
+        nonlocal stop_requested, stop_reason
+        stop_requested = True
+        try:
+            stop_reason = signal.Signals(signum).name.lower()
+        except ValueError:
+            stop_reason = f"signal_{signum}"
+        print(f"\n[signal] received {stop_reason}; will save checkpoint and stop...")
+
+    signal.signal(signal.SIGINT, _request_stop)
+    signal.signal(signal.SIGTERM, _request_stop)
 
     # ===== 14. TRAINING/VALIDATION FUNCTION =====
     def run_epoch(
@@ -1151,6 +1204,8 @@ def main() -> None:
             )
 
         for step, batch in enumerate(it):
+            if stop_requested:
+                raise KeyboardInterrupt
             if train:
                 global_step += 1
 
@@ -1343,7 +1398,6 @@ def main() -> None:
     if monitor_mode not in {"max", "min"}:
         raise ValueError(f"Invalid monitor_mode: {train_args.monitor_mode}. Use 'max' or 'min'.")
 
-    ckpt_dir = os.path.join(train_args.output_dir, train_args.checkpoint_subdir)
     if save_top_k > 0:
         os.makedirs(ckpt_dir, exist_ok=True)
 
@@ -1397,12 +1451,14 @@ def main() -> None:
 
     # ===== 16. MAIN TRAINING LOOP =====
     # Iterate over epochs (full passes through training data)
-    for epoch in range(1, train_args.num_train_epochs + 1):
-        # Run one epoch of training
-        train_metrics = run_epoch(train_loader, train=True, split="train", epoch_idx=epoch)
+    try:
+        for epoch in range(1, train_args.num_train_epochs + 1):
+            current_epoch = epoch
+            # Run one epoch of training
+            train_metrics = run_epoch(train_loader, train=True, split="train", epoch_idx=epoch)
 
-        # Run one epoch of validation (no gradient updates)
-        val_metrics = run_epoch(val_loader, train=False, split="val", epoch_idx=epoch)
+            # Run one epoch of validation (no gradient updates)
+            val_metrics = run_epoch(val_loader, train=False, split="val", epoch_idx=epoch)
 
         # Print epoch summary
         print(
@@ -1434,8 +1490,8 @@ def main() -> None:
                 step=global_step,
             )
 
-        # Save best checkpoints (top-k by chosen validation metric)
-        maybe_save_topk(epoch, train_metrics, val_metrics)
+            # Save best checkpoints (top-k by chosen validation metric)
+            maybe_save_topk(epoch, train_metrics, val_metrics)
 
         # ===== 17. LOG METRICS TO CSV =====
         # Append mode: add to end of file without overwriting
@@ -1456,8 +1512,11 @@ def main() -> None:
                 f"{val_metrics['reg_top1']:.6f},{model_args.decode_mode}\n"
             )
 
-    if wandb_run is not None:
-        wandb_run.finish()
+    except KeyboardInterrupt:
+        save_interrupt_checkpoint(stop_reason)
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 # ============================================================================

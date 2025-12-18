@@ -151,3 +151,37 @@ python src/lit_recon_probe.py \
 
 如果你想把这个实验扩展为 ROI 版本或 Delta Test，我可以在这个脚本基础上继续加。  
 先把这两条跑通，就能得到非常清晰的“压缩是否保真”的证据了 💡
+
+---
+
+## 6) TODO：下一步实验清单（可持续追加）🧪
+
+> 建议每次跑完把命令 + 关键指标（`val/reg_cos`、`val/cos`、`val/mse`、`val/top1`）记录到 W&B 或 `lit_metrics.csv`，并把最好的 ckpt 路径记下来。
+
+### A. 先把评估做“快反馈”
+- [ ] 做一个 `valid_small`（例如 200–1000 例）用于快速迭代（减少每个 epoch 的等待）
+- [ ] 确认 train/val 的样本数是否正确（避免 val 误配成 train）
+- [ ] 固定随机种子，重复跑 2 次看方差（确认曲线/指标稳定）
+
+### B. 核心消融：压缩到底丢没丢信息（看 val）
+- [ ] `perceiver_num` 扫描：`32 → 16 → 8`（压缩更狠应显著掉分）
+- [ ] `decode_mode` 对照：`pre_proj` vs `post_proj`（验证 projection 是否扭曲信息）
+- [ ] 上界对照：不用压缩（直接用 `x` 或更高 `perceiver_num`）估计“理论最好能到哪”
+- [ ] 破坏性对照：打乱/随机化 `z`（例如 shuffle latents）训练 decoder，应明显掉分（排除“偶然好看”）
+
+### C. Decoder 容量与损失权重（避免 decoder 太强造成误判）
+- [ ] `decoder_layers` 扫描：`1/2/4/6`（看 val 提升是否来自 decoder 变强）
+- [ ] `lambda_region` 扫描：`0 / 0.1 / 0.3 / 1.0`（global vs region trade-off）
+- [ ] 监控指标从 `reg_cos` 切到 `loss/mse/top1` 做对照（避免只看一个指标）
+
+### D. 速度与资源（共享服务器友好）
+- [ ] Token cache：缓存冻结 ViT 的 `x_g`（必要时再缓存 `x_region`），训练阶段直接读 cache（大幅减少 NIfTI I/O + CPU transforms）
+- [ ] DataLoader 参数 sweep：`num_workers/pin_memory/persistent_workers`（目标：提高 GPU 利用率、降低 swap）
+- [ ] 如需用双卡：把脚本改成 DDP（否则多卡不会自动变快）
+
+### E. 结果可解释性（写论文/做分析用）
+- [ ] 按 region 拆分指标（每个器官单独 `reg_cos/reg_top1`），找最难的部位
+- [ ] 统计 “最差 token”（top-1%）集中在哪些 slice/区域（定位压缩丢失点）
+- [ ] 可视化：token 的 PCA/TSNE 或 cosine 分布（global vs region 的差异）
+
+你可以把新的实验条目继续往这个列表里加（保持一条=一个可执行的对照/消融）。  
