@@ -17,8 +17,9 @@ print("=" * 60)
 print("MONAI Cache Debug Script")
 print("=" * 60)
 
-# Create a test cache directory
-test_cache = "/tmp/test_cache_debug"
+# Create a test cache directory (force fresh cache with timestamp)
+import time
+test_cache = f"/tmp/test_cache_debug_{int(time.time())}"
 os.makedirs(test_cache, exist_ok=True)
 
 print(f"\n1. Creating dataset with test cache: {test_cache}")
