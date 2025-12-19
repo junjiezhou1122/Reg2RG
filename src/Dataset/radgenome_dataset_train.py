@@ -60,12 +60,8 @@ class RadGenomePersistentCacheTransform:
     Caches the expensive part (NIfTI loading + crop/resize) so future epochs
     can reuse cached tensors from disk and reduce CPU/IO pressure.
 
-    IMPORTANT: This transform MODIFIES the input dict in-place by adding:
-    - img_hu: torch.Tensor, shape (1, H, W, D) in HU space (not normalized)
-    - seg: torch.Tensor, shape (N, H, W, D) resized masks (float/binary)
-    - mask_keys: List[str], region names aligned with seg[0..N-1]
-
-    This allows MONAI PersistentDataset to correctly cache the output tensors.
+    Returns a NEW dict containing only the cached tensors (not file paths).
+    This is the standard MONAI pattern that works with PersistentDataset.
     """
 
     def __init__(self, target_size: Tuple[int, int, int] = (256, 256, 64)) -> None:
@@ -108,13 +104,13 @@ class RadGenomePersistentCacheTransform:
 
         tensors = self._image_transform({"img": img_data, "seg": seg_data})
         
-        # CRITICAL: Add tensor outputs to input dict so MONAI can cache them
-        # This modifies the input dict in-place, allowing PersistentDataset to cache
-        sample["img_hu"] = tensors["img"]
-        sample["seg"] = tensors["seg"]
-        sample["mask_keys"] = mask_keys
-        
-        return sample
+        # Return a NEW dict with only tensor data (MONAI standard pattern)
+        # This will be cached by PersistentDataset
+        return {
+            "img_hu": tensors["img"],
+            "seg": tensors["seg"],
+            "mask_keys": mask_keys,
+        }
     
 class RadGenomeDataset_Train(PersistentDataset):
     def __init__(self, text_tokenizer, data_folder, mask_folder, csv_file, cache_dir, max_region_size=10, max_img_size = 1, image_num = 32, region_num=33, max_seq=2048, resize_dim=500, voc_size=32000, force_num_frames=True):
@@ -296,21 +292,22 @@ class RadGenomeDataset_Train(PersistentDataset):
         return text
 
     def __getitem__(self, index):
+        # Get original sample metadata (file paths, accession, etc.)
         raw = self.data[index]
         img_file = raw["image"]
         accession = raw.get("accession", os.path.basename(img_file))
 
+        # Build region reports from original metadata
         region_reports = {}
-        mask_files = {}
         for key, value in raw.items():
             # Skip metadata keys that are not anatomical regions
-            if key in {"image", "accession", "_cache_version", "img_hu", "seg", "mask_keys"}:
+            if key in {"image", "accession", "_cache_version"}:
                 continue
             # Only process keys that are actually anatomical regions with reports
             if key in REGIONS and key in self.accession_to_sentences.get(accession, {}):
-                mask_files[key] = value
                 region_reports[key] = self.accession_to_sentences[accession][key]
 
+        # Get cached tensors from PersistentDataset (img_hu, seg, mask_keys)
         cached = super().__getitem__(index)
         img_hu: torch.Tensor = cached["img_hu"]  # (1, H, W, D)
         seg: torch.Tensor = cached["seg"]        # (N, H, W, D)
