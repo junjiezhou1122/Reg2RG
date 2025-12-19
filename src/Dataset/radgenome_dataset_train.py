@@ -158,6 +158,9 @@ class RadGenomeDataset_Train(PersistentDataset):
         self.data_folder = data_folder
         self.mask_folder = mask_folder
         self.csv_file = csv_file
+        # Bump this string when the cached transform/output schema changes.
+        # It becomes part of each sample dict and therefore part of MONAI's cache key.
+        self.cache_version = "lit_img_hu_seg_v1"
 
         self.accession_to_sentences = self.load_accession_sentences(csv_file)
         self.paths=[]
@@ -196,6 +199,15 @@ class RadGenomeDataset_Train(PersistentDataset):
 
         if os.path.exists(cache_file):
             samples = pickle.load(open(cache_file, 'rb'))
+            # Forward-compat: ensure required fields exist in cached sample lists.
+            for sample in samples:
+                if isinstance(sample, dict):
+                    sample.setdefault("_cache_version", self.cache_version)
+                    # Older cached sample lists may store [mask_path, report] tuples/lists.
+                    for region in REGIONS:
+                        value = sample.get(region)
+                        if isinstance(value, (list, tuple)) and value:
+                            sample[region] = value[0]
         else:
             for patient_folder in tqdm.tqdm(patient_folders):
                 accession_folders = glob.glob(os.path.join(patient_folder, '*'))
@@ -211,6 +223,7 @@ class RadGenomeDataset_Train(PersistentDataset):
                         single_sample = {}
                         single_sample["image"] = nii_file
                         single_sample["accession"] = accession_number
+                        single_sample["_cache_version"] = self.cache_version
 
                         volume_name = accession_number.split(".")[0]
                         mask_path = os.path.join(self.mask_folder, 'seg_'+volume_name)
@@ -243,7 +256,7 @@ class RadGenomeDataset_Train(PersistentDataset):
         Cache sample list per (data_folder, mask_folder, csv_file) to avoid
         train/val collisions when multiple datasets are instantiated.
         """
-        key = f"{self.data_folder}|{self.mask_folder}|{self.csv_file}"
+        key = f"{self.data_folder}|{self.mask_folder}|{self.csv_file}|{self.cache_version}"
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
         return os.path.join(current_file_dir, f"samples_{digest}.pkl")
 

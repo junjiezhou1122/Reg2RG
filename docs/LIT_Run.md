@@ -129,6 +129,8 @@ python src/lit_recon_probe.py \
 注意：
 - cache 会保存在 `--monai_cache_dir`，程序退出后不会消失，下次直接复用
 - 如果你修改了预处理逻辑/想重建 cache：删掉 `--monai_cache_dir` 下对应目录即可
+- 如果你之前用同一个目录缓存过“别的版本/别的输出”，建议换一个新的 cache 目录（或清空旧目录），避免命中旧 cache
+- 当前实现会把 `lit_img_hu_seg_v1` 写入样本的 cache key；如果你想隔离不同实验/不同版本，请自己用不同的 `--monai_cache_dir`。
 
 ---
 
