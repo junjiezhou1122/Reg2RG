@@ -60,7 +60,7 @@ class RadGenomePersistentCacheTransform(Transform):
 
     Inherits from Transform so MONAI recognizes it as cacheable (non-randomizable).
     Loads NIfTI files, applies crop/resize, and adds processed tensors to the data dict.
-    
+
     MONAI PersistentDataset will cache the output of this transform automatically.
     """
 
@@ -88,14 +88,14 @@ class RadGenomePersistentCacheTransform(Transform):
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Transform that loads and processes NIfTI files.
-        
+
         CRITICAL: Must return the SAME dict object (modified in-place) or a new dict
         that contains ALL original keys plus new processed keys. This allows MONAI
         to cache the full result properly.
         """
         # Make a copy to avoid modifying the original during caching
         d = dict(data)
-        
+
         img_path = d["image"]
 
         # Collect mask paths and keys
@@ -117,14 +117,14 @@ class RadGenomePersistentCacheTransform(Transform):
 
         # Apply MONAI transforms (crop, resize, to tensor)
         tensors = self._image_transform({"img": img_data, "seg": seg_data})
-        
+
         # Add processed tensors to the dict (MONAI will cache this full dict)
         d["img_hu"] = tensors["img"]
         d["seg"] = tensors["seg"]
         d["mask_keys"] = mask_keys
-        
+
         return d
-    
+
 class RobustPersistentDataset(PersistentDataset):
     """
     PersistentDataset with atomic writes to prevent cache corruption on interruption.
@@ -413,7 +413,7 @@ class RadGenomeDataset_Train(RobustPersistentDataset):
         # Get cached data from PersistentDataset (includes original keys + processed tensors)
         # MONAI has already run the transform and cached the result
         cached = super().__getitem__(index)
-        
+
         # Extract metadata from cached dict
         img_file = cached["image"]
         accession = cached.get("accession", os.path.basename(img_file))
@@ -471,7 +471,7 @@ class RadGenomeDataset_Train(RobustPersistentDataset):
             region2area[i] = shuffled_areas[i]
 
         instruction = "Given the provided global and regional information from this CT scan, please generate a comprehensive medical report for each region. First, identify the anatomical area corresponding to each region, then provide detailed information about these anatomical structures and any abnormalities that are essential. You can refer to the global information as the context and take it as a supplement when generating each region report."
-        
+
         # prompt = self.text_add_image_tokens(instruction)
         prompt = self.text_add_region_tokens(instruction, num_regions=len(region2area))
 
@@ -485,7 +485,7 @@ class RadGenomeDataset_Train(RobustPersistentDataset):
 
         # make text input
         self.text_tokenizer.padding_side = "right"
-            
+
         text_tensor = self.text_tokenizer(
             prompt + ' ' + combined_report, max_length=self.max_seq, truncation=True, padding="max_length", return_tensors="pt"
         )
@@ -506,10 +506,10 @@ class RadGenomeDataset_Train(RobustPersistentDataset):
         label[label >= self.voc_size] = -100
         label[:prompt_length] = -100  # only focus on answer part
 
-        return {'lang_x': text_input, 
-                'vision_x': mask_img_tensors, 
+        return {'lang_x': text_input,
+                'vision_x': mask_img_tensors,
                 'mask_x': mask_tensors,
                 'region2area': region2area,
-                'attention_mask': attention_mask, 
+                'attention_mask': attention_mask,
                 'label': label
                 }

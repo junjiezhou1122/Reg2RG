@@ -1221,6 +1221,9 @@ def main() -> None:
         shuffle=True,                               # Shuffle each epoch (important!)
         num_workers=train_args.dataloader_num_workers,  # Parallel data loading
         collate_fn=collator,                        # Custom batching function
+        pin_memory=True,                            # Speed up CPU->GPU transfer
+        persistent_workers=True if train_args.dataloader_num_workers > 0 else False,  # Reuse workers
+        prefetch_factor=2 if train_args.dataloader_num_workers > 0 else None,  # Prefetch batches
     )
 
     # Validation data loader (same as train but no shuffling)
@@ -1230,6 +1233,9 @@ def main() -> None:
         shuffle=False,                              # Don't shuffle validation
         num_workers=train_args.dataloader_num_workers,
         collate_fn=collator,
+        pin_memory=True,                            # Speed up CPU->GPU transfer
+        persistent_workers=True if train_args.dataloader_num_workers > 0 else False,  # Reuse workers
+        prefetch_factor=2 if train_args.dataloader_num_workers > 0 else None,  # Prefetch batches
     )
 
     # ===== 7. MODEL INITIALIZATION =====
