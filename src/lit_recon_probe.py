@@ -289,6 +289,14 @@ class TrainArguments:
             "Note: warmup workers only speed up caching, not training."
         },
     )
+    warmup_priority: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Process nice priority for cache warmup (-20=highest, 19=lowest). "
+            "Negative values require sudo. Recommended: -5 to -10 for shared systems. "
+            "Leave None to skip priority adjustment."
+        },
+    )
 
 
 # ============================================================================
@@ -894,6 +902,7 @@ def warmup_monai_cache(
     show_progress: bool,
     max_items: Optional[int],
     num_workers: int,
+    priority: Optional[int] = None,
 ) -> None:
     """
     Warm up MONAI PersistentDataset cache by triggering _transform.
@@ -908,7 +917,33 @@ def warmup_monai_cache(
     - Pre-scan to count already-cached vs uncached samples
     - Display real-time statistics (cached_skip / processed)
     - Show accurate completion estimates based on actual work
+
+    Args:
+        dataset: Dataset to warm up
+        desc: Description for progress bar
+        show_progress: Whether to show tqdm progress bar
+        max_items: Optional max samples to process
+        num_workers: Number of DataLoader workers
+        priority: Process nice priority (-20 to 19, None=no change)
     """
+
+    # Set process priority if requested
+    if priority is not None:
+        try:
+            import os
+            current_nice = os.nice(0)  # Get current
+            os.nice(priority - current_nice)  # Adjust
+            final_nice = os.nice(0)
+            if final_nice < 0:
+                print(f"🚀 Process priority set to {final_nice} (HIGH priority)")
+            elif final_nice == 0:
+                print(f"⚙️  Process priority set to {final_nice} (normal priority)")
+            else:
+                print(f"🐌 Process priority set to {final_nice} (low priority)")
+        except PermissionError:
+            print(f"⚠️  Cannot set priority to {priority} (need sudo for negative values)")
+        except Exception as e:
+            print(f"⚠️  Failed to set priority: {e}")
 
     base_ds: torch.utils.data.Dataset = dataset
     indices: List[int]
@@ -923,13 +958,18 @@ def warmup_monai_cache(
 
     # Pre-scan to count cached vs uncached samples
     if hasattr(base_ds, 'cache_exists'):
-        print(f"Scanning cache status for {len(indices)} samples...")
+        print(f"🔍 Scanning cache status for {len(indices)} samples...")
         uncached_indices = []
         cached_count = 0
 
         scan_iterator = indices
         if show_progress and tqdm is not None:
-            scan_iterator = tqdm(indices, desc=f"{desc} [scanning]", leave=False)
+            scan_iterator = tqdm(
+                indices,
+                desc=f"📊 {desc} [scanning]",
+                leave=False,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
+            )
 
         for idx in scan_iterator:
             if base_ds.cache_exists(idx):  # type: ignore[attr-defined]
@@ -938,12 +978,13 @@ def warmup_monai_cache(
                 uncached_indices.append(idx)
 
         uncached_count = len(uncached_indices)
-        print(f"Cache status: {cached_count}/{len(indices)} already cached, "
+        cache_percent = (cached_count / len(indices) * 100) if len(indices) > 0 else 0
+        print(f"✨ Cache status: {cached_count}/{len(indices)} already cached ({cache_percent:.1f}%), "
               f"{uncached_count} need processing")
 
         # If everything is cached, skip warmup
         if uncached_count == 0:
-            print(f"All samples already cached. Skipping warmup.")
+            print(f"🎉 All samples already cached! Skipping warmup.")
             return
     else:
         # Fallback if cache_exists not available
@@ -956,8 +997,14 @@ def warmup_monai_cache(
         # Single-process warmup with smart skipping and detailed progress
         iterator = indices
         if show_progress and tqdm is not None:
-            iterator = tqdm(indices, desc=desc, leave=True,
-                          total=len(indices))
+            iterator = tqdm(
+                indices,
+                desc=f"⚡ {desc}",
+                leave=True,
+                total=len(indices),
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}',
+                colour='green'
+            )
 
         cached_skip = 0
         processed = 0
@@ -967,17 +1014,23 @@ def warmup_monai_cache(
             if hasattr(base_ds, 'cache_exists') and base_ds.cache_exists(idx):  # type: ignore[attr-defined]
                 cached_skip += 1
                 if show_progress and tqdm is not None:
-                    iterator.set_postfix(cached=cached_skip, processed=processed, refresh=False)  # type: ignore[attr-defined]
+                    iterator.set_postfix(  # type: ignore[attr-defined]
+                        {'✓cached': cached_skip, '🔥new': processed},
+                        refresh=False
+                    )
                 continue  # Skip - cache exists (几毫秒)
 
             # Trigger MONAI's caching by accessing the item (calls __getitem__ -> _cachecheck)
             _ = base_ds[idx]  # Only process if cache missing (5-10秒)
             processed += 1
             if show_progress and tqdm is not None:
-                iterator.set_postfix(cached=cached_skip, processed=processed, refresh=False)  # type: ignore[attr-defined]
+                iterator.set_postfix(  # type: ignore[attr-defined]
+                    {'✓cached': cached_skip, '🔥new': processed},
+                    refresh=False
+                )
 
         if show_progress:
-            print(f"Warmup complete: {cached_skip} cached (skipped), {processed} processed")
+            print(f"✅ Warmup complete: {cached_skip} cached (skipped), {processed} newly processed")
         return
 
     # Parallel warmup: avoid transferring large tensors back to the main process.
@@ -1013,7 +1066,14 @@ def warmup_monai_cache(
 
     iterator = loader
     if show_progress and tqdm is not None:
-        iterator = tqdm(loader, total=len(warmup_ds), desc=desc, leave=True)
+        iterator = tqdm(
+            loader,
+            total=len(warmup_ds),
+            desc=f"⚡ {desc} [{num_workers}w]",
+            leave=True,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}',
+            colour='cyan'
+        )
 
     cached_skip = 0
     processed = 0
@@ -1026,10 +1086,13 @@ def warmup_monai_cache(
             processed += 1
 
         if show_progress and tqdm is not None:
-            iterator.set_postfix(cached=cached_skip, processed=processed, refresh=False)  # type: ignore[attr-defined]
+            iterator.set_postfix(  # type: ignore[attr-defined]
+                {'✓cached': cached_skip, '🔥new': processed},
+                refresh=False
+            )
 
     if show_progress:
-        print(f"Warmup complete: {cached_skip} cached (skipped), {processed} processed")
+        print(f"✅ Warmup complete: {cached_skip} cached (skipped), {processed} newly processed")
 
 
 # ============================================================================
@@ -1195,6 +1258,7 @@ def main() -> None:
             show_progress=train_args.show_progress,
             max_items=train_args.precache_max_items,
             num_workers=train_args.precache_num_workers,
+            priority=train_args.warmup_priority,
         )
     if precache_mode in {"val", "both"}:
         print("Warming up MONAI cache for validation set...")
@@ -1204,6 +1268,7 @@ def main() -> None:
             show_progress=train_args.show_progress,
             max_items=train_args.precache_max_items,
             num_workers=train_args.precache_num_workers,
+            priority=train_args.warmup_priority,
         )
 
     if train_args.precache_only and precache_mode != "none":
