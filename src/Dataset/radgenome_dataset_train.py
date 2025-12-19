@@ -60,10 +60,12 @@ class RadGenomePersistentCacheTransform:
     Caches the expensive part (NIfTI loading + crop/resize) so future epochs
     can reuse cached tensors from disk and reduce CPU/IO pressure.
 
-    The transform returns:
+    IMPORTANT: This transform MODIFIES the input dict in-place by adding:
     - img_hu: torch.Tensor, shape (1, H, W, D) in HU space (not normalized)
     - seg: torch.Tensor, shape (N, H, W, D) resized masks (float/binary)
     - mask_keys: List[str], region names aligned with seg[0..N-1]
+
+    This allows MONAI PersistentDataset to correctly cache the output tensors.
     """
 
     def __init__(self, target_size: Tuple[int, int, int] = (256, 256, 64)) -> None:
@@ -105,11 +107,14 @@ class RadGenomePersistentCacheTransform:
         seg_data = np.stack(masks, axis=0)  # (N, H, W, D)
 
         tensors = self._image_transform({"img": img_data, "seg": seg_data})
-        return {
-            "img_hu": tensors["img"],
-            "seg": tensors["seg"],
-            "mask_keys": mask_keys,
-        }
+        
+        # CRITICAL: Add tensor outputs to input dict so MONAI can cache them
+        # This modifies the input dict in-place, allowing PersistentDataset to cache
+        sample["img_hu"] = tensors["img"]
+        sample["seg"] = tensors["seg"]
+        sample["mask_keys"] = mask_keys
+        
+        return sample
     
 class RadGenomeDataset_Train(PersistentDataset):
     def __init__(self, text_tokenizer, data_folder, mask_folder, csv_file, cache_dir, max_region_size=10, max_img_size = 1, image_num = 32, region_num=33, max_seq=2048, resize_dim=500, voc_size=32000, force_num_frames=True):
