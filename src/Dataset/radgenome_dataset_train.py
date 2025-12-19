@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 import monai.transforms as transforms
-from monai.data import PersistentDataset
+from monai.data import PersistentDataset, CacheDataset
 import nibabel as nib
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
 from functools import partial
@@ -112,7 +112,7 @@ class RadGenomePersistentCacheTransform:
             "mask_keys": mask_keys,
         }
     
-class RadGenomeDataset_Train(PersistentDataset):
+class RadGenomeDataset_Train(Dataset):
     def __init__(self, text_tokenizer, data_folder, mask_folder, csv_file, cache_dir, max_region_size=10, max_img_size = 1, image_num = 32, region_num=33, max_seq=2048, resize_dim=500, voc_size=32000, force_num_frames=True):
         # text_tokenizer
         self.text_tokenizer = AutoTokenizer.from_pretrained(
@@ -169,8 +169,10 @@ class RadGenomeDataset_Train(PersistentDataset):
         self.target_size = (256, 256, 64) #NOTE: the target input size of the image
         self._cache_transform = RadGenomePersistentCacheTransform(target_size=self.target_size)
         self._region_resize = transforms.Resize(spatial_size=self.target_size, mode="trilinear")
-
-        super().__init__(data=self.samples, transform=self._cache_transform, cache_dir=cache_dir)
+        self.cache_dir = cache_dir
+        
+        # Create cache directory if it doesn't exist
+        os.makedirs(self.cache_dir, exist_ok=True)
 
     def load_accession_sentences(self, xlsx_file):
         df = pd.read_csv(xlsx_file)
@@ -291,9 +293,38 @@ class RadGenomeDataset_Train(PersistentDataset):
 
         return text
 
+    def _get_cache_path(self, index: int) -> str:
+        """Get cache file path for a sample index."""
+        raw = self.samples[index]
+        # Create a unique hash based on sample content
+        key = f"{raw['image']}|{raw.get('_cache_version', 'v1')}"
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+        return os.path.join(self.cache_dir, f"{digest}.pt")
+    
+    def _load_or_compute_cached_tensors(self, index: int) -> Dict[str, Any]:
+        """Load cached tensors from disk, or compute and save them."""
+        cache_path = self._get_cache_path(index)
+        
+        # Try to load from cache
+        if os.path.exists(cache_path):
+            try:
+                return torch.load(cache_path, map_location="cpu")
+            except Exception as e:
+                # Cache corrupted, recompute
+                print(f"Warning: Cache file {cache_path} corrupted ({e}), recomputing...")
+                os.remove(cache_path)
+        
+        # Cache miss: compute transform and save
+        raw = self.samples[index]
+        cached = self._cache_transform(raw)
+        
+        # Save to disk
+        torch.save(cached, cache_path)
+        return cached
+
     def __getitem__(self, index):
         # Get original sample metadata (file paths, accession, etc.)
-        raw = self.data[index]
+        raw = self.samples[index]
         img_file = raw["image"]
         accession = raw.get("accession", os.path.basename(img_file))
 
@@ -307,8 +338,8 @@ class RadGenomeDataset_Train(PersistentDataset):
             if key in REGIONS and key in self.accession_to_sentences.get(accession, {}):
                 region_reports[key] = self.accession_to_sentences[accession][key]
 
-        # Get cached tensors from PersistentDataset (img_hu, seg, mask_keys)
-        cached = super().__getitem__(index)
+        # Get cached tensors (img_hu, seg, mask_keys) from disk or compute
+        cached = self._load_or_compute_cached_tensors(index)
         img_hu: torch.Tensor = cached["img_hu"]  # (1, H, W, D)
         seg: torch.Tensor = cached["seg"]        # (N, H, W, D)
         mask_keys: List[str] = cached["mask_keys"]
