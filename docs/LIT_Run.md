@@ -116,6 +116,14 @@ python src/lit_recon_probe.py \
   --precache_only True
 ```
 
+想让预热更快（并行构建 cache），可以加：
+
+```bash
+  --precache_num_workers 8
+```
+
+> 共享服务器上如果 RAM/`/dev/shm` 紧张，`precache_num_workers` 建议从 `2/4` 逐步加，避免 OOM/worker 崩溃。
+
 2) **cache 建好后**：再把 `--dataloader_num_workers` 慢慢加到 `2/4`（不建议直接上 `8/16`）
 
 注意：

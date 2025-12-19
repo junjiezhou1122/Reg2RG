@@ -282,6 +282,13 @@ class TrainArguments:
         default=None,
         metadata={"help": "Optional cap on items to warm up (useful for testing)."},
     )
+    precache_num_workers: int = field(
+        default=0,
+        metadata={
+            "help": "Number of DataLoader workers for cache warmup (0 = single-process). "
+            "Note: warmup workers only speed up caching, not training."
+        },
+    )
 
 
 # ============================================================================
@@ -886,6 +893,7 @@ def warmup_monai_cache(
     desc: str,
     show_progress: bool,
     max_items: Optional[int],
+    num_workers: int,
 ) -> None:
     """
     Warm up MONAI PersistentDataset cache without running the dataset's full __getitem__.
@@ -913,12 +921,46 @@ def warmup_monai_cache(
             "MONAI is required for persistent caching but could not be imported."
         ) from exc
 
-    iterator = indices
-    if show_progress and tqdm is not None:
-        iterator = tqdm(indices, desc=desc, leave=True)
+    if num_workers <= 0:
+        iterator = indices
+        if show_progress and tqdm is not None:
+            iterator = tqdm(indices, desc=desc, leave=True)
 
-    for idx in iterator:
-        MonaiPersistentDataset.__getitem__(base_ds, idx)  # type: ignore[misc]
+        for idx in iterator:
+            MonaiPersistentDataset.__getitem__(base_ds, idx)  # type: ignore[misc]
+        return
+
+    # Parallel warmup: avoid transferring large tensors back to the main process.
+    # Each worker triggers PersistentDataset caching and returns a tiny value.
+    class _WarmupDataset(torch.utils.data.Dataset):
+        def __init__(self, base: torch.utils.data.Dataset, idxs: List[int]) -> None:
+            self.base = base
+            self.idxs = idxs
+
+        def __len__(self) -> int:  # noqa: D401
+            return len(self.idxs)
+
+        def __getitem__(self, i: int) -> int:
+            MonaiPersistentDataset.__getitem__(self.base, self.idxs[i])  # type: ignore[misc]
+            return 0
+
+    warmup_ds = _WarmupDataset(base_ds, indices)
+    loader = DataLoader(
+        warmup_ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=False,
+        prefetch_factor=1,
+        persistent_workers=True,
+    )
+
+    iterator = loader
+    if show_progress and tqdm is not None:
+        iterator = tqdm(loader, total=len(warmup_ds), desc=desc, leave=True)
+
+    for _ in iterator:
+        pass
 
 
 # ============================================================================
@@ -1083,6 +1125,7 @@ def main() -> None:
             desc="[cache] train",
             show_progress=train_args.show_progress,
             max_items=train_args.precache_max_items,
+            num_workers=train_args.precache_num_workers,
         )
     if precache_mode in {"val", "both"}:
         print("Warming up MONAI cache for validation set...")
@@ -1091,6 +1134,7 @@ def main() -> None:
             desc="[cache] val",
             show_progress=train_args.show_progress,
             max_items=train_args.precache_max_items,
+            num_workers=train_args.precache_num_workers,
         )
 
     if train_args.precache_only and precache_mode != "none":
