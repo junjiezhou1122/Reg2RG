@@ -901,8 +901,13 @@ def warmup_monai_cache(
     RadGenomeDataset_Train inherits from PersistentDataset with a MapTransform-based
     cacheable transform. This function triggers MONAI's _transform method which loads
     NIfTI files and applies preprocessing, caching the results for future use.
-    
+
     We call _transform instead of __getitem__ to skip text tokenization which is not cacheable.
+
+    Progress bar improvements:
+    - Pre-scan to count already-cached vs uncached samples
+    - Display real-time statistics (cached_skip / processed)
+    - Show accurate completion estimates based on actual work
     """
 
     base_ds: torch.utils.data.Dataset = dataset
@@ -916,19 +921,63 @@ def warmup_monai_cache(
     if max_items is not None:
         indices = indices[: max_items]
 
+    # Pre-scan to count cached vs uncached samples
+    if hasattr(base_ds, 'cache_exists'):
+        print(f"Scanning cache status for {len(indices)} samples...")
+        uncached_indices = []
+        cached_count = 0
+
+        scan_iterator = indices
+        if show_progress and tqdm is not None:
+            scan_iterator = tqdm(indices, desc=f"{desc} [scanning]", leave=False)
+
+        for idx in scan_iterator:
+            if base_ds.cache_exists(idx):  # type: ignore[attr-defined]
+                cached_count += 1
+            else:
+                uncached_indices.append(idx)
+
+        uncached_count = len(uncached_indices)
+        print(f"Cache status: {cached_count}/{len(indices)} already cached, "
+              f"{uncached_count} need processing")
+
+        # If everything is cached, skip warmup
+        if uncached_count == 0:
+            print(f"All samples already cached. Skipping warmup.")
+            return
+    else:
+        # Fallback if cache_exists not available
+        uncached_indices = indices
+        uncached_count = len(indices)
+        cached_count = 0
+
     # Check if dataset is a PersistentDataset with _transform method
     if num_workers <= 0:
-        # Single-process warmup with smart skipping
+        # Single-process warmup with smart skipping and detailed progress
         iterator = indices
         if show_progress and tqdm is not None:
-            iterator = tqdm(indices, desc=desc, leave=True)
+            iterator = tqdm(indices, desc=desc, leave=True,
+                          total=len(indices))
+
+        cached_skip = 0
+        processed = 0
 
         for idx in iterator:
             # Fast check: skip if cache already exists (only compute missing ones)
             if hasattr(base_ds, 'cache_exists') and base_ds.cache_exists(idx):  # type: ignore[attr-defined]
+                cached_skip += 1
+                if show_progress and tqdm is not None:
+                    iterator.set_postfix(cached=cached_skip, processed=processed, refresh=False)  # type: ignore[attr-defined]
                 continue  # Skip - cache exists (几毫秒)
+
             # Trigger MONAI's caching by accessing the item (calls __getitem__ -> _cachecheck)
             _ = base_ds[idx]  # Only process if cache missing (5-10秒)
+            processed += 1
+            if show_progress and tqdm is not None:
+                iterator.set_postfix(cached=cached_skip, processed=processed, refresh=False)  # type: ignore[attr-defined]
+
+        if show_progress:
+            print(f"Warmup complete: {cached_skip} cached (skipped), {processed} processed")
         return
 
     # Parallel warmup: avoid transferring large tensors back to the main process.
@@ -941,14 +990,15 @@ def warmup_monai_cache(
         def __len__(self) -> int:  # noqa: D401
             return len(self.idxs)
 
-        def __getitem__(self, i: int) -> int:
+        def __getitem__(self, i: int) -> Tuple[int, int]:
+            """Returns (was_cached, idx) tuple for statistics tracking."""
             idx = self.idxs[i]
             # Smart skip: only process if cache doesn't exist
             if hasattr(self.base, 'cache_exists') and self.base.cache_exists(idx):  # type: ignore[attr-defined]
-                return 0  # Cache exists, skip (fast)
+                return (1, idx)  # Cache exists, skip (fast)
             # Trigger MONAI's caching by accessing the item
             _ = self.base[idx]  # type: ignore[index]
-            return 0
+            return (0, idx)  # Processed
 
     warmup_ds = _WarmupDataset(base_ds, indices)
     loader = DataLoader(
@@ -965,8 +1015,21 @@ def warmup_monai_cache(
     if show_progress and tqdm is not None:
         iterator = tqdm(loader, total=len(warmup_ds), desc=desc, leave=True)
 
-    for _ in iterator:
-        pass
+    cached_skip = 0
+    processed = 0
+
+    for batch in iterator:
+        was_cached = batch[0].item()  # type: ignore[index]
+        if was_cached:
+            cached_skip += 1
+        else:
+            processed += 1
+
+        if show_progress and tqdm is not None:
+            iterator.set_postfix(cached=cached_skip, processed=processed, refresh=False)  # type: ignore[attr-defined]
+
+    if show_progress:
+        print(f"Warmup complete: {cached_skip} cached (skipped), {processed} processed")
 
 
 # ============================================================================
