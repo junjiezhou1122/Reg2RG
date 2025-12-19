@@ -1056,12 +1056,12 @@ def warmup_monai_cache(
     warmup_ds = _WarmupDataset(base_ds, indices)
     loader = DataLoader(
         warmup_ds,
-        batch_size=1,
+        batch_size=4,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=False,
         prefetch_factor=1,
-        persistent_workers=True,
+        persistent_workers=False,
     )
 
     iterator = loader
