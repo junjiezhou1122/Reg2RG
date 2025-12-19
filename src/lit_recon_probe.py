@@ -924,13 +924,16 @@ def warmup_monai_cache(
         )
 
     if num_workers <= 0:
-        # Single-process warmup
+        # Single-process warmup with smart skipping
         iterator = indices
         if show_progress and tqdm is not None:
             iterator = tqdm(indices, desc=desc, leave=True)
 
         for idx in iterator:
-            base_ds._transform(idx)  # type: ignore[attr-defined]
+            # Fast check: skip if cache already exists (only compute missing ones)
+            if hasattr(base_ds, 'cache_exists') and base_ds.cache_exists(idx):  # type: ignore[attr-defined]
+                continue  # Skip - cache exists (几毫秒)
+            base_ds._transform(idx)  # Only process if cache missing (5-10秒)
         return
 
     # Parallel warmup: avoid transferring large tensors back to the main process.
@@ -944,7 +947,11 @@ def warmup_monai_cache(
             return len(self.idxs)
 
         def __getitem__(self, i: int) -> int:
-            self.base._transform(self.idxs[i])  # type: ignore[attr-defined]
+            idx = self.idxs[i]
+            # Smart skip: only process if cache doesn't exist
+            if hasattr(self.base, 'cache_exists') and self.base.cache_exists(idx):  # type: ignore[attr-defined]
+                return 0  # Cache exists, skip (fast)
+            self.base._transform(idx)  # type: ignore[attr-defined]
             return 0
 
     warmup_ds = _WarmupDataset(base_ds, indices)

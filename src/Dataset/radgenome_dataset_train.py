@@ -178,6 +178,16 @@ class RobustPersistentDataset(PersistentDataset):
         if self.hash_transform is not None:
             hash_val += self.hash_transform(self.transform)
         return os.path.join(self.cache_dir, f"{hash_val}.pt")
+    
+    def cache_exists(self, index: int) -> bool:
+        """
+        Fast check if cache exists for a given index without loading it.
+        Used for efficient warmup progress tracking.
+        """
+        item = self.data[index]
+        hashfile = self._get_hashfile(item)
+        # Check both .pt and .tmp (if .tmp exists, cache is being written)
+        return os.path.exists(hashfile) or os.path.exists(hashfile + ".tmp")
 
 
 class RadGenomeDataset_Train(RobustPersistentDataset):
