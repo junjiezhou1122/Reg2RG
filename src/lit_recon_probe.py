@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple  # Type hints for better code doc
 import torch  # PyTorch main library for tensor operations and neural networks
 import torch.nn.functional as F  # Functional interface for operations like MSE, normalize
 from torch import nn  # Neural network modules (Linear, LayerNorm, etc.)
-from torch.utils.data import DataLoader, random_split  # Data loading and splitting utilities
+from torch.utils.data import DataLoader, Subset, random_split  # Data loading and splitting utilities
 import transformers  # Hugging Face library for argument parsing
 
 try:
@@ -265,6 +265,22 @@ class TrainArguments:
     checkpoint_subdir: str = field(
         default="checkpoints",
         metadata={"help": "Subdirectory under output_dir to store checkpoints."},
+    )
+
+    # ===== MONAI Persistent Cache Warmup =====
+    precache_splits: str = field(
+        default="none",
+        metadata={
+            "help": "Warm up MONAI PersistentDataset cache before training: none|train|val|both."
+        },
+    )
+    precache_only: bool = field(
+        default=False,
+        metadata={"help": "If True, build the requested cache and exit (no training)."},
+    )
+    precache_max_items: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional cap on items to warm up (useful for testing)."},
     )
 
 
@@ -865,6 +881,46 @@ def set_requires_grad(module: nn.Module, requires_grad: bool) -> None:
         param.requires_grad = requires_grad
 
 
+def warmup_monai_cache(
+    dataset: torch.utils.data.Dataset,
+    desc: str,
+    show_progress: bool,
+    max_items: Optional[int],
+) -> None:
+    """
+    Warm up MONAI PersistentDataset cache without running the dataset's full __getitem__.
+
+    Our RadGenome dataset's __getitem__ also tokenizes text and builds prompts.
+    Those parts are not cacheable and would make "cache warmup" unnecessarily slow.
+    Here we trigger MONAI's base PersistentDataset __getitem__ (transform + disk cache).
+    """
+
+    base_ds: torch.utils.data.Dataset = dataset
+    indices: List[int]
+    if isinstance(dataset, Subset):
+        base_ds = dataset.dataset  # type: ignore[assignment]
+        indices = list(dataset.indices)  # type: ignore[attr-defined]
+    else:
+        indices = list(range(len(dataset)))
+
+    if max_items is not None:
+        indices = indices[: max_items]
+
+    try:
+        from monai.data import PersistentDataset as MonaiPersistentDataset  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise ImportError(
+            "MONAI is required for persistent caching but could not be imported."
+        ) from exc
+
+    iterator = indices
+    if show_progress and tqdm is not None:
+        iterator = tqdm(indices, desc=desc, leave=True)
+
+    for idx in iterator:
+        MonaiPersistentDataset.__getitem__(base_ds, idx)  # type: ignore[misc]
+
+
 # ============================================================================
 # MAIN TRAINING LOOP
 # ============================================================================
@@ -1010,6 +1066,36 @@ def main() -> None:
             generator=torch.Generator().manual_seed(42),  # Fixed seed
         )
         print(f"Using random_split for validation: val_split={data_args.val_split}")
+
+    # ===== 5.5. OPTIONAL: WARM UP MONAI PERSISTENT CACHE =====
+    precache_mode = (train_args.precache_splits or "none").lower()
+    valid_modes = {"none", "train", "val", "both"}
+    if precache_mode not in valid_modes:
+        raise ValueError(
+            f"Invalid --precache_splits {train_args.precache_splits!r}. "
+            f"Choose one of: {', '.join(sorted(valid_modes))}"
+        )
+
+    if precache_mode in {"train", "both"}:
+        print("Warming up MONAI cache for training set...")
+        warmup_monai_cache(
+            train_set,
+            desc="[cache] train",
+            show_progress=train_args.show_progress,
+            max_items=train_args.precache_max_items,
+        )
+    if precache_mode in {"val", "both"}:
+        print("Warming up MONAI cache for validation set...")
+        warmup_monai_cache(
+            val_set,
+            desc="[cache] val",
+            show_progress=train_args.show_progress,
+            max_items=train_args.precache_max_items,
+        )
+
+    if train_args.precache_only and precache_mode != "none":
+        print("Cache warmup complete (--precache_only True). Exiting without training.")
+        return
 
     # ===== 6. DATA LOADERS =====
     # Initialize custom collator for batching

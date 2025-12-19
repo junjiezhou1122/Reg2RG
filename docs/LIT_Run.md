@@ -89,6 +89,41 @@ python src/lit_recon_probe.py \
 
 ---
 
+### ✅ 用 MONAI Persistent Cache 加速数据加载（强烈推荐）
+
+本项目的 `RadGenomeDataset_Train` 已改成**真正使用** MONAI `PersistentDataset`：
+会把最耗 CPU 的部分（`.nii.gz` 读取 + crop/resize）缓存到 `--monai_cache_dir`，之后 epoch 会明显更快，也更不容易因为 CPU/IO 抢不到而卡住。
+
+建议流程：
+
+1) **第一次建 cache（最稳）**：把 worker 设小，避免共享服务器上内存峰值/`/dev/shm` 爆掉
+
+```bash
+python src/lit_recon_probe.py \
+  ...你的其他参数... \
+  --monai_cache_dir /mnt2/ct/RadGenome-ChestCT/cache \
+  --dataloader_num_workers 0
+```
+
+也可以只做“预热缓存”不训练（推荐先把 valid cache 好，之后可以频繁做 validation）：
+
+```bash
+python src/lit_recon_probe.py \
+  ...你的 train/val 路径参数... \
+  --monai_cache_dir /mnt2/ct/RadGenome-ChestCT/cache \
+  --dataloader_num_workers 0 \
+  --precache_splits both \
+  --precache_only True
+```
+
+2) **cache 建好后**：再把 `--dataloader_num_workers` 慢慢加到 `2/4`（不建议直接上 `8/16`）
+
+注意：
+- cache 会保存在 `--monai_cache_dir`，程序退出后不会消失，下次直接复用
+- 如果你修改了预处理逻辑/想重建 cache：删掉 `--monai_cache_dir` 下对应目录即可
+
+---
+
 ## 3) 输出会在哪 📦
 
 每次运行会生成：

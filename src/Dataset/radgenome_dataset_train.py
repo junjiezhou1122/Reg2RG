@@ -15,6 +15,8 @@ import torch.nn.functional as F
 import tqdm
 import random
 import pickle
+import hashlib
+from typing import Any, Dict, List, Tuple
 
 CONDITIONS = [
     'Medical material',
@@ -49,6 +51,65 @@ REGIONS = [
     'thyroid',
     'trachea and bronchie',
 ]
+
+
+class RadGenomePersistentCacheTransform:
+    """
+    Deterministic preprocessing for MONAI PersistentDataset caching.
+
+    Caches the expensive part (NIfTI loading + crop/resize) so future epochs
+    can reuse cached tensors from disk and reduce CPU/IO pressure.
+
+    The transform returns:
+    - img_hu: torch.Tensor, shape (1, H, W, D) in HU space (not normalized)
+    - seg: torch.Tensor, shape (N, H, W, D) resized masks (float/binary)
+    - mask_keys: List[str], region names aligned with seg[0..N-1]
+    """
+
+    def __init__(self, target_size: Tuple[int, int, int] = (256, 256, 64)) -> None:
+        self.target_size = target_size
+
+        def threshold(x: np.ndarray) -> np.ndarray:
+            return x > -1000
+
+        self._image_transform = transforms.Compose(
+            [
+                transforms.CropForegroundd(
+                    keys=["img", "seg"], source_key="img", select_fn=threshold
+                ),
+                transforms.Resized(
+                    keys=["img", "seg"],
+                    spatial_size=self.target_size,
+                    mode=("trilinear", "nearest"),
+                ),
+                transforms.ToTensord(keys=["img", "seg"]),
+            ]
+        )
+
+    def __call__(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        img_path = sample["image"]
+
+        mask_paths: List[str] = []
+        mask_keys: List[str] = []
+        for region in REGIONS:
+            if region in sample:
+                mask_paths.append(sample[region])
+                mask_keys.append(region)
+
+        img_data = nib.load(img_path).get_fdata().astype(np.float32)
+        img_data = img_data[np.newaxis, ...]  # (1, H, W, D)
+
+        masks: List[np.ndarray] = []
+        for mask_path in mask_paths:
+            masks.append(nib.load(mask_path).get_fdata().astype(np.float32))
+        seg_data = np.stack(masks, axis=0)  # (N, H, W, D)
+
+        tensors = self._image_transform({"img": img_data, "seg": seg_data})
+        return {
+            "img_hu": tensors["img"],
+            "seg": tensors["seg"],
+            "mask_keys": mask_keys,
+        }
     
 class RadGenomeDataset_Train(PersistentDataset):
     def __init__(self, text_tokenizer, data_folder, mask_folder, csv_file, cache_dir, max_region_size=10, max_img_size = 1, image_num = 32, region_num=33, max_seq=2048, resize_dim=500, voc_size=32000, force_num_frames=True):
@@ -96,28 +157,16 @@ class RadGenomeDataset_Train(PersistentDataset):
         self.max_seq = max_seq
         self.data_folder = data_folder
         self.mask_folder = mask_folder
+        self.csv_file = csv_file
 
         self.accession_to_sentences = self.load_accession_sentences(csv_file)
         self.paths=[]
         self.samples = self.prepare_samples()
         self.target_size = (256, 256, 64) #NOTE: the target input size of the image
-        def threshold(x):
-            # threshold at 1
-            return x > -1000
-        self.region_transform = transforms.Compose([
-            # transforms.ResizeWithPadOrCrop(spatial_size=self.target_size),
-            transforms.CropForeground(select_fn=threshold),
-            transforms.Resize(spatial_size=self.target_size),
-            transforms.ToTensor()
-        ])
-        self.image_transform = transforms.Compose([
-            # transforms.ResizeWithPadOrCrop(spatial_size=self.target_size),
-            transforms.CropForegroundd(keys=['img', 'seg'], source_key='img', select_fn=threshold),
-            transforms.Resized(keys=['img', 'seg'], spatial_size=self.target_size),
-            transforms.ToTensord(keys=['img', 'seg'])
-        ])
-        self.mask_img_to_tensor = partial(self.mask_nii_img_to_tensor, region_transform = self.region_transform, image_transform=self.image_transform)
-        super().__init__(data=self.samples, transform=None, cache_dir=cache_dir)
+        self._cache_transform = RadGenomePersistentCacheTransform(target_size=self.target_size)
+        self._region_resize = transforms.Resize(spatial_size=self.target_size, mode="trilinear")
+
+        super().__init__(data=self.samples, transform=self._cache_transform, cache_dir=cache_dir)
 
     def load_accession_sentences(self, xlsx_file):
         df = pd.read_csv(xlsx_file)
@@ -143,7 +192,7 @@ class RadGenomeDataset_Train(PersistentDataset):
         
         # 获取当前文件的绝对路径
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        cache_file = os.path.join(current_file_dir, 'train_samples.pkl')
+        cache_file = self._get_samples_cache_path(current_file_dir)
 
         if os.path.exists(cache_file):
             samples = pickle.load(open(cache_file, 'rb'))
@@ -154,24 +203,26 @@ class RadGenomeDataset_Train(PersistentDataset):
                 for accession_folder in accession_folders:
                     nii_files = glob.glob(os.path.join(accession_folder, '*.nii.gz'))
                     for nii_file in nii_files:
-                        accession_number = nii_file.split("/")[-1]
+                        accession_number = os.path.basename(nii_file)
 
                         if accession_number not in self.accession_to_sentences:
                             continue
                             
                         single_sample = {}
+                        single_sample["image"] = nii_file
+                        single_sample["accession"] = accession_number
+
                         volume_name = accession_number.split(".")[0]
                         mask_path = os.path.join(self.mask_folder, 'seg_'+volume_name)
-                        # add nii_file to single_sample
-                        single_sample['image'] = nii_file
 
                         flag = False
                         for region in REGIONS:
                             # NOTE: only use the samples with the corresponding region report
                             if region in self.accession_to_sentences[accession_number]:
                                 mask_file = os.path.join(mask_path, region + '.nii.gz')
-                                region_report = self.accession_to_sentences[accession_number][region]
-                                single_sample[region] = [mask_file, region_report]
+                                if not os.path.exists(mask_file):
+                                    continue
+                                single_sample[region] = mask_file
                                 flag = True
                         if not flag: # NOTE: if there is no corresponding region report, skip this sample
                             continue
@@ -187,68 +238,29 @@ class RadGenomeDataset_Train(PersistentDataset):
 
         return samples
 
+    def _get_samples_cache_path(self, current_file_dir: str) -> str:
+        """
+        Cache sample list per (data_folder, mask_folder, csv_file) to avoid
+        train/val collisions when multiple datasets are instantiated.
+        """
+        key = f"{self.data_folder}|{self.mask_folder}|{self.csv_file}"
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+        return os.path.join(current_file_dir, f"samples_{digest}.pkl")
+
     def __len__(self):
         return len(self.samples)
 
-    def mask_nii_img_to_tensor(self, img_path, mask_paths, region_transform, image_transform):
-        img_data = nib.load(img_path).get_fdata()
-
-        mask_img_tensors = {}
-        flag = False
-        masks = []
-        mask_keys = []
-        for key, mask_path in mask_paths.items():
-            
-            mask_data = nib.load(mask_path).get_fdata()
-            masks.append(mask_data)
-            mask_keys.append(key)
-
-            # NOTE: check whether the mask is empty
-            if np.sum(mask_data) == 0:
-                continue
-
-            mask_img = img_data * mask_data
-
-            mask_img[mask_data == 0] = -1024
-            mask_img = mask_img[np.newaxis, ...]
-
-            tensor = region_transform(mask_img)
-
-            hu_min, hu_max = -1000, 200 #NOTE: can directly clip to this range, do not need clip to [-1000, 1000] first
-            tensor = torch.clamp(tensor, hu_min, hu_max)
-
-            tensor = (((tensor+400 ) / 600)).float()
-            
-            # repeat the tensor to have 3 channels
-            tensor = tensor.repeat(3, 1, 1, 1)
-
-            tensor = tensor.unsqueeze(0) # shape: (1, 3, 256, 256, 64)
-
-            mask_img_tensors[key] = tensor
-            flag = True
-
-        if not flag:
-            print('No mask: ', img_path)
-        
-        # process img_data
-        img_data = img_data[np.newaxis, ...]
-        masks_data = np.stack(masks, axis=0)
-        tensors = image_transform({'img': img_data, 'seg': masks_data})
-
-        img_tensor = tensors['img']
-        img_tensor = torch.clamp(img_tensor, hu_min, hu_max)
-        img_tensor = (((img_tensor+400 ) / 600)).float()
-        # repeat the tensor to have 3 channels
-        img_tensor = img_tensor.repeat(3, 1, 1, 1)
-        img_tensor = img_tensor.unsqueeze(0) # shape: (1, 3, 256, 256, 64)
-        mask_img_tensors['image'] = img_tensor
-
-        masks_tensor = tensors['seg']
-        mask_tensors = {}
-        for i, key in enumerate(mask_keys):
-            mask_tensors[key] = masks_tensor[i].unsqueeze(0)
-
-        return mask_img_tensors, mask_tensors
+    def _mask_bbox(self, mask: torch.Tensor) -> Tuple[int, int, int, int, int, int]:
+        """
+        Compute (h0, h1, w0, w1, d0, d1) bbox for a 3D mask tensor (H, W, D).
+        Assumes mask contains at least one positive voxel.
+        """
+        idx = mask.nonzero(as_tuple=False)
+        mins = idx.min(dim=0).values
+        maxs = idx.max(dim=0).values
+        h0, w0, d0 = (int(v) for v in mins.tolist())
+        h1, w1, d1 = (int(v) for v in maxs.tolist())
+        return h0, h1, w0, w1, d0, d1
 
     def text_add_image_tokens(self, text):
         
@@ -266,18 +278,53 @@ class RadGenomeDataset_Train(PersistentDataset):
         return text
 
     def __getitem__(self, index):
-        img_file = self.data[index]['image']
+        raw = self.data[index]
+        img_file = raw["image"]
+        accession = raw.get("accession", os.path.basename(img_file))
 
         region_reports = {}
         mask_files = {}
-        for key in self.data[index]:
-            if key == 'image':
+        for key, value in raw.items():
+            if key in {"image", "accession"}:
                 continue
-            mask_file, region_report = self.data[index][key]
-            region_reports[key] = region_report
-            mask_files[key] = mask_file
+            mask_files[key] = value
+            region_reports[key] = self.accession_to_sentences[accession][key]
 
-        mask_img_tensors, mask_tensors = self.mask_img_to_tensor(img_file, mask_files)
+        cached = super().__getitem__(index)
+        img_hu: torch.Tensor = cached["img_hu"]  # (1, H, W, D)
+        seg: torch.Tensor = cached["seg"]        # (N, H, W, D)
+        mask_keys: List[str] = cached["mask_keys"]
+
+        hu_min, hu_max = -1000, 200
+        global_img = torch.clamp(img_hu, hu_min, hu_max)
+        global_img = ((global_img + 400) / 600).float()
+        global_img = global_img.repeat(3, 1, 1, 1).unsqueeze(0)  # (1, 3, H, W, D)
+
+        mask_img_tensors: Dict[str, torch.Tensor] = {"image": global_img}
+        mask_tensors: Dict[str, torch.Tensor] = {}
+
+        # Build region-specific tensors from cached (img_hu, seg) to avoid re-loading NIfTI.
+        # We threshold seg to a binary mask because resizing may introduce interpolation.
+        for i, key in enumerate(mask_keys):
+            if key not in region_reports:
+                continue
+            mask = (seg[i] > 0.5)
+            if mask.sum().item() == 0:
+                continue
+
+            h0, h1, w0, w1, d0, d1 = self._mask_bbox(mask)
+            img_crop = img_hu[:, h0 : h1 + 1, w0 : w1 + 1, d0 : d1 + 1].clone()
+            mask_crop = mask[h0 : h1 + 1, w0 : w1 + 1, d0 : d1 + 1]
+
+            img_crop[:, ~mask_crop] = -1024
+            img_crop = self._region_resize(img_crop)  # (1, H, W, D) -> target_size
+
+            img_crop = torch.clamp(img_crop, hu_min, hu_max)
+            img_crop = ((img_crop + 400) / 600).float()
+            img_crop = img_crop.repeat(3, 1, 1, 1).unsqueeze(0)  # (1, 3, H, W, D)
+
+            mask_img_tensors[key] = img_crop
+            mask_tensors[key] = seg[i].unsqueeze(0)
 
         #NOTE: remove useless regions from region_reports according to mask_img_tensors
         for key in list(region_reports.keys()):
