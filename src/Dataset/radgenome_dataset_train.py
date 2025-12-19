@@ -125,7 +125,62 @@ class RadGenomePersistentCacheTransform(Transform):
         
         return d
     
-class RadGenomeDataset_Train(PersistentDataset):
+class RobustPersistentDataset(PersistentDataset):
+    """
+    PersistentDataset with atomic writes to prevent cache corruption on interruption.
+    
+    Key improvements:
+    - Atomic writes: tmp file → rename (interrupted writes don't corrupt cache)
+    - Skip corrupted files: if a file is corrupted, recompute instead of crashing
+    - Safe for interruption and multi-user environments
+    """
+    
+    def _cachecheck(self, item_transformed):
+        """
+        Override MONAI's _cachecheck to add atomic write and error handling.
+        """
+        hashfile = self._get_hashfile(item_transformed)
+        
+        # Try to load existing cache
+        if os.path.exists(hashfile):
+            try:
+                return torch.load(hashfile, map_location="cpu")
+            except Exception as e:
+                # Corrupted cache file - delete and recompute
+                print(f"Warning: Corrupted cache {hashfile}, recomputing... ({e})")
+                try:
+                    os.remove(hashfile)
+                except:
+                    pass
+        
+        # Cache miss or corrupted - compute with transform
+        result = self.transform(item_transformed)
+        
+        # Atomic write: write to .tmp then rename (crash-safe)
+        tmp_file = hashfile + ".tmp"
+        try:
+            torch.save(result, tmp_file)
+            os.replace(tmp_file, hashfile)  # Atomic on POSIX systems
+        except Exception as e:
+            print(f"Warning: Failed to save cache: {e}")
+            if os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except:
+                    pass
+        
+        return result
+    
+    def _get_hashfile(self, item):
+        """Get the cache filename for an item (uses MONAI's hashing)."""
+        # Use MONAI's internal hashing function
+        hash_val = self.hash_func(item)
+        if self.hash_transform is not None:
+            hash_val += self.hash_transform(self.transform)
+        return os.path.join(self.cache_dir, f"{hash_val}.pt")
+
+
+class RadGenomeDataset_Train(RobustPersistentDataset):
     def __init__(self, text_tokenizer, data_folder, mask_folder, csv_file, cache_dir, max_region_size=10, max_img_size = 1, image_num = 32, region_num=33, max_seq=2048, resize_dim=500, voc_size=32000, force_num_frames=True):
         # text_tokenizer
         self.text_tokenizer = AutoTokenizer.from_pretrained(
