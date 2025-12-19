@@ -917,12 +917,6 @@ def warmup_monai_cache(
         indices = indices[: max_items]
 
     # Check if dataset is a PersistentDataset with _transform method
-    if not hasattr(base_ds, '_transform'):
-        raise AttributeError(
-            f"Dataset {type(base_ds).__name__} does not have _transform method. "
-            "Make sure you're using MONAI PersistentDataset."
-        )
-
     if num_workers <= 0:
         # Single-process warmup with smart skipping
         iterator = indices
@@ -933,11 +927,12 @@ def warmup_monai_cache(
             # Fast check: skip if cache already exists (only compute missing ones)
             if hasattr(base_ds, 'cache_exists') and base_ds.cache_exists(idx):  # type: ignore[attr-defined]
                 continue  # Skip - cache exists (几毫秒)
-            base_ds._transform(idx)  # Only process if cache missing (5-10秒)
+            # Trigger MONAI's caching by accessing the item (calls __getitem__ -> _cachecheck)
+            _ = base_ds[idx]  # Only process if cache missing (5-10秒)
         return
 
     # Parallel warmup: avoid transferring large tensors back to the main process.
-    # Each worker triggers MONAI's _transform and returns a tiny value.
+    # Each worker triggers MONAI's caching and returns a tiny value.
     class _WarmupDataset(torch.utils.data.Dataset):
         def __init__(self, base: torch.utils.data.Dataset, idxs: List[int]) -> None:
             self.base = base
@@ -951,7 +946,8 @@ def warmup_monai_cache(
             # Smart skip: only process if cache doesn't exist
             if hasattr(self.base, 'cache_exists') and self.base.cache_exists(idx):  # type: ignore[attr-defined]
                 return 0  # Cache exists, skip (fast)
-            self.base._transform(idx)  # type: ignore[attr-defined]
+            # Trigger MONAI's caching by accessing the item
+            _ = self.base[idx]  # type: ignore[index]
             return 0
 
     warmup_ds = _WarmupDataset(base_ds, indices)

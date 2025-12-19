@@ -180,15 +180,52 @@ class RobustPersistentDataset(PersistentDataset):
             hash_val += self.hash_transform(self.transform)
         return os.path.join(self.cache_dir, f"{hash_val}.pt")
     
-    def cache_exists(self, index: int) -> bool:
+    def cache_exists(self, index: int, deep_check: bool = False) -> bool:
         """
-        Fast check if cache exists for a given index without loading it.
+        Fast check if cache exists and is valid for a given index.
         Used for efficient warmup progress tracking.
+
+        Args:
+            index: Sample index to check
+            deep_check: If True, actually load the file to verify integrity (slower but safer)
+
+        Returns True only if:
+        1. Cache file exists (.pt)
+        2. File is not empty (basic sanity check)
+        3. (Optional) File can be loaded without corruption
         """
         item = self.data[index]
         hashfile = self._get_hashfile(item)
-        # Check both .pt and .tmp (if .tmp exists, cache is being written)
-        return os.path.exists(hashfile) or os.path.exists(hashfile + ".tmp")
+
+        # Quick check: file must exist and have non-zero size
+        if not os.path.exists(hashfile):
+            return False
+
+        # Basic integrity check: file should not be empty
+        try:
+            file_size = os.path.getsize(hashfile)
+            if file_size == 0:
+                # Empty file - corrupted, remove it
+                os.remove(hashfile)
+                return False
+        except (OSError, IOError):
+            return False
+
+        # Optional: Deep validation (loads the file to verify integrity)
+        if deep_check:
+            try:
+                torch.load(hashfile, map_location="cpu")
+                return True
+            except Exception:
+                # Corrupted - delete and return False
+                print(f"Warning: Corrupted cache detected at {hashfile}, will recompute")
+                try:
+                    os.remove(hashfile)
+                except:
+                    pass
+                return False
+
+        return True
 
 
 class RadGenomeDataset_Train(RobustPersistentDataset):
