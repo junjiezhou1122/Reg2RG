@@ -303,10 +303,13 @@ class RadGenomeDataset_Train(PersistentDataset):
         region_reports = {}
         mask_files = {}
         for key, value in raw.items():
-            if key in {"image", "accession"}:
+            # Skip metadata keys that are not anatomical regions
+            if key in {"image", "accession", "_cache_version", "img_hu", "seg", "mask_keys"}:
                 continue
-            mask_files[key] = value
-            region_reports[key] = self.accession_to_sentences[accession][key]
+            # Only process keys that are actually anatomical regions with reports
+            if key in REGIONS and key in self.accession_to_sentences.get(accession, {}):
+                mask_files[key] = value
+                region_reports[key] = self.accession_to_sentences[accession][key]
 
         cached = super().__getitem__(index)
         img_hu: torch.Tensor = cached["img_hu"]  # (1, H, W, D)
