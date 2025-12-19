@@ -8,7 +8,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 import monai.transforms as transforms
 from monai.data import PersistentDataset
-from monai.transforms import MapTransform
+from monai.transforms import Transform
 import nibabel as nib
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
 from functools import partial
@@ -54,20 +54,18 @@ REGIONS = [
 ]
 
 
-class RadGenomePersistentCacheTransform(MapTransform):
+class RadGenomePersistentCacheTransform(Transform):
     """
     MONAI-compliant deterministic transform for PersistentDataset caching.
 
-    Inherits from MapTransform so MONAI recognizes it as cacheable.
+    Inherits from Transform so MONAI recognizes it as cacheable (non-randomizable).
     Loads NIfTI files, applies crop/resize, and adds processed tensors to the data dict.
     
     MONAI PersistentDataset will cache the output of this transform automatically.
     """
 
     def __init__(self, target_size: Tuple[int, int, int] = (256, 256, 64)) -> None:
-        # MapTransform requires keys parameter, but we process dynamically
-        # Pass empty keys and set allow_missing_keys=True
-        super().__init__(keys=[], allow_missing_keys=True)
+        super().__init__()
         self.target_size = target_size
 
         def threshold(x: np.ndarray) -> np.ndarray:
