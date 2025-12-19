@@ -33,28 +33,31 @@ ds = RadGenomeDataset_Train(
 
 print(f"   Dataset length: {len(ds)}")
 
-# Test transform directly
-print("\n2. Testing transform on first sample...")
-sample_0 = ds.samples[0].copy()  # Make a copy to avoid side effects
-print(f"   Input keys: {list(sample_0.keys())}")
-
-result = ds._cache_transform(sample_0)
-print(f"   Output keys: {list(result.keys())}")
-
-# Check if tensors are in output
-has_tensors = False
-print("\n3. Checking transform output:")
-for k, v in result.items():
-    if isinstance(v, torch.Tensor):
-        print(f"   ✓ {k}: Tensor {tuple(v.shape)} {v.dtype} ({v.numel() * v.element_size() / 1e6:.1f} MB)")
-        has_tensors = True
+# Test MONAI's internal _transform method directly
+print("\n2. Testing MONAI _transform on first sample...")
+try:
+    # MONAI PersistentDataset's _transform takes an index, not a sample
+    result = ds._transform(0)
+    print(f"   Output keys: {list(result.keys())}")
+    
+    # Check if tensors are in output
+    has_tensors = False
+    print("\n3. Checking _transform output:")
+    for k, v in result.items():
+        if isinstance(v, torch.Tensor):
+            print(f"   ✓ {k}: Tensor {tuple(v.shape)} {v.dtype} ({v.numel() * v.element_size() / 1e6:.1f} MB)")
+            has_tensors = True
+        else:
+            print(f"   ✗ {k}: {type(v).__name__} ({len(str(v))} chars)")
+    
+    if not has_tensors:
+        print("\n   ❌ ERROR: No tensors in _transform output!")
     else:
-        print(f"   ✗ {k}: {type(v).__name__} ({len(str(v))} chars)")
-
-if not has_tensors:
-    print("\n   ❌ ERROR: No tensors in transform output!")
-else:
-    print("\n   ✓ Transform outputs contain tensors")
+        print("\n   ✓ Transform outputs contain tensors")
+except Exception as e:
+    print(f"   ✗ Error during _transform: {e}")
+    import traceback
+    traceback.print_exc()
 
 # Test actual dataset __getitem__ (triggers MONAI caching)
 print("\n4. Calling dataset[0] (triggers MONAI PersistentDataset)...")

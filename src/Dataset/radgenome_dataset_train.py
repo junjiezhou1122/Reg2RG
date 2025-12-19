@@ -7,7 +7,8 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 import monai.transforms as transforms
-from monai.data import PersistentDataset, CacheDataset
+from monai.data import PersistentDataset
+from monai.transforms import MapTransform
 import nibabel as nib
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
 from functools import partial
@@ -53,18 +54,20 @@ REGIONS = [
 ]
 
 
-class RadGenomePersistentCacheTransform:
+class RadGenomePersistentCacheTransform(MapTransform):
     """
-    Deterministic preprocessing for MONAI PersistentDataset caching.
+    MONAI-compliant deterministic transform for PersistentDataset caching.
 
-    Caches the expensive part (NIfTI loading + crop/resize) so future epochs
-    can reuse cached tensors from disk and reduce CPU/IO pressure.
-
-    Returns a NEW dict containing only the cached tensors (not file paths).
-    This is the standard MONAI pattern that works with PersistentDataset.
+    Inherits from MapTransform so MONAI recognizes it as cacheable.
+    Loads NIfTI files, applies crop/resize, and adds processed tensors to the data dict.
+    
+    MONAI PersistentDataset will cache the output of this transform automatically.
     """
 
     def __init__(self, target_size: Tuple[int, int, int] = (256, 256, 64)) -> None:
+        # MapTransform requires keys parameter, but we process dynamically
+        # Pass empty keys and set allow_missing_keys=True
+        super().__init__(keys=[], allow_missing_keys=True)
         self.target_size = target_size
 
         def threshold(x: np.ndarray) -> np.ndarray:
@@ -84,16 +87,28 @@ class RadGenomePersistentCacheTransform:
             ]
         )
 
-    def __call__(self, sample: Dict[str, Any]) -> Dict[str, Any]:
-        img_path = sample["image"]
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Transform that loads and processes NIfTI files.
+        
+        CRITICAL: Must return the SAME dict object (modified in-place) or a new dict
+        that contains ALL original keys plus new processed keys. This allows MONAI
+        to cache the full result properly.
+        """
+        # Make a copy to avoid modifying the original during caching
+        d = dict(data)
+        
+        img_path = d["image"]
 
+        # Collect mask paths and keys
         mask_paths: List[str] = []
         mask_keys: List[str] = []
         for region in REGIONS:
-            if region in sample:
-                mask_paths.append(sample[region])
+            if region in d:
+                mask_paths.append(d[region])
                 mask_keys.append(region)
 
+        # Load image and masks from NIfTI files
         img_data = nib.load(img_path).get_fdata().astype(np.float32)
         img_data = img_data[np.newaxis, ...]  # (1, H, W, D)
 
@@ -102,17 +117,17 @@ class RadGenomePersistentCacheTransform:
             masks.append(nib.load(mask_path).get_fdata().astype(np.float32))
         seg_data = np.stack(masks, axis=0)  # (N, H, W, D)
 
+        # Apply MONAI transforms (crop, resize, to tensor)
         tensors = self._image_transform({"img": img_data, "seg": seg_data})
         
-        # Return a NEW dict with only tensor data (MONAI standard pattern)
-        # This will be cached by PersistentDataset
-        return {
-            "img_hu": tensors["img"],
-            "seg": tensors["seg"],
-            "mask_keys": mask_keys,
-        }
+        # Add processed tensors to the dict (MONAI will cache this full dict)
+        d["img_hu"] = tensors["img"]
+        d["seg"] = tensors["seg"]
+        d["mask_keys"] = mask_keys
+        
+        return d
     
-class RadGenomeDataset_Train(Dataset):
+class RadGenomeDataset_Train(PersistentDataset):
     def __init__(self, text_tokenizer, data_folder, mask_folder, csv_file, cache_dir, max_region_size=10, max_img_size = 1, image_num = 32, region_num=33, max_seq=2048, resize_dim=500, voc_size=32000, force_num_frames=True):
         # text_tokenizer
         self.text_tokenizer = AutoTokenizer.from_pretrained(
@@ -169,10 +184,10 @@ class RadGenomeDataset_Train(Dataset):
         self.target_size = (256, 256, 64) #NOTE: the target input size of the image
         self._cache_transform = RadGenomePersistentCacheTransform(target_size=self.target_size)
         self._region_resize = transforms.Resize(spatial_size=self.target_size, mode="trilinear")
-        self.cache_dir = cache_dir
         
-        # Create cache directory if it doesn't exist
-        os.makedirs(self.cache_dir, exist_ok=True)
+        # Initialize PersistentDataset with samples and transform
+        # MONAI will automatically cache the transform output to cache_dir
+        super().__init__(data=self.samples, transform=self._cache_transform, cache_dir=cache_dir)
 
     def load_accession_sentences(self, xlsx_file):
         df = pd.read_csv(xlsx_file)
@@ -293,53 +308,20 @@ class RadGenomeDataset_Train(Dataset):
 
         return text
 
-    def _get_cache_path(self, index: int) -> str:
-        """Get cache file path for a sample index."""
-        raw = self.samples[index]
-        # Create a unique hash based on sample content
-        key = f"{raw['image']}|{raw.get('_cache_version', 'v1')}"
-        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
-        return os.path.join(self.cache_dir, f"{digest}.pt")
-    
-    def _load_or_compute_cached_tensors(self, index: int) -> Dict[str, Any]:
-        """Load cached tensors from disk, or compute and save them."""
-        cache_path = self._get_cache_path(index)
-        
-        # Try to load from cache
-        if os.path.exists(cache_path):
-            try:
-                return torch.load(cache_path, map_location="cpu")
-            except Exception as e:
-                # Cache corrupted, recompute
-                print(f"Warning: Cache file {cache_path} corrupted ({e}), recomputing...")
-                os.remove(cache_path)
-        
-        # Cache miss: compute transform and save
-        raw = self.samples[index]
-        cached = self._cache_transform(raw)
-        
-        # Save to disk
-        torch.save(cached, cache_path)
-        return cached
-
     def __getitem__(self, index):
-        # Get original sample metadata (file paths, accession, etc.)
-        raw = self.samples[index]
-        img_file = raw["image"]
-        accession = raw.get("accession", os.path.basename(img_file))
+        # Get cached data from PersistentDataset (includes original keys + processed tensors)
+        # MONAI has already run the transform and cached the result
+        cached = super().__getitem__(index)
+        
+        # Extract metadata from cached dict
+        img_file = cached["image"]
+        accession = cached.get("accession", os.path.basename(img_file))
 
-        # Build region reports from original metadata
+        # Build region reports from cached metadata
         region_reports = {}
-        for key, value in raw.items():
-            # Skip metadata keys that are not anatomical regions
-            if key in {"image", "accession", "_cache_version"}:
-                continue
-            # Only process keys that are actually anatomical regions with reports
-            if key in REGIONS and key in self.accession_to_sentences.get(accession, {}):
+        for key in REGIONS:
+            if key in cached and key in self.accession_to_sentences.get(accession, {}):
                 region_reports[key] = self.accession_to_sentences[accession][key]
-
-        # Get cached tensors (img_hu, seg, mask_keys) from disk or compute
-        cached = self._load_or_compute_cached_tensors(index)
         img_hu: torch.Tensor = cached["img_hu"]  # (1, H, W, D)
         seg: torch.Tensor = cached["seg"]        # (N, H, W, D)
         mask_keys: List[str] = cached["mask_keys"]

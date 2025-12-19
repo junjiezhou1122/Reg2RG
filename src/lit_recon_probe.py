@@ -896,11 +896,13 @@ def warmup_monai_cache(
     num_workers: int,
 ) -> None:
     """
-    Warm up custom disk cache by triggering _load_or_compute_cached_tensors.
+    Warm up MONAI PersistentDataset cache by triggering _transform.
 
-    Our RadGenome dataset uses custom caching in _load_or_compute_cached_tensors().
-    This function only triggers the expensive transform (NIfTI loading + preprocessing),
-    not the full __getitem__ (which includes text tokenization).
+    RadGenomeDataset_Train inherits from PersistentDataset with a MapTransform-based
+    cacheable transform. This function triggers MONAI's _transform method which loads
+    NIfTI files and applies preprocessing, caching the results for future use.
+    
+    We call _transform instead of __getitem__ to skip text tokenization which is not cacheable.
     """
 
     base_ds: torch.utils.data.Dataset = dataset
@@ -914,11 +916,11 @@ def warmup_monai_cache(
     if max_items is not None:
         indices = indices[: max_items]
 
-    # Check if dataset has our custom cache method
-    if not hasattr(base_ds, '_load_or_compute_cached_tensors'):
+    # Check if dataset is a PersistentDataset with _transform method
+    if not hasattr(base_ds, '_transform'):
         raise AttributeError(
-            f"Dataset {type(base_ds).__name__} does not have _load_or_compute_cached_tensors method. "
-            "Make sure you're using the custom RadGenomeDataset_Train implementation."
+            f"Dataset {type(base_ds).__name__} does not have _transform method. "
+            "Make sure you're using MONAI PersistentDataset."
         )
 
     if num_workers <= 0:
@@ -928,11 +930,11 @@ def warmup_monai_cache(
             iterator = tqdm(indices, desc=desc, leave=True)
 
         for idx in iterator:
-            base_ds._load_or_compute_cached_tensors(idx)  # type: ignore[attr-defined]
+            base_ds._transform(idx)  # type: ignore[attr-defined]
         return
 
     # Parallel warmup: avoid transferring large tensors back to the main process.
-    # Each worker triggers caching and returns a tiny value.
+    # Each worker triggers MONAI's _transform and returns a tiny value.
     class _WarmupDataset(torch.utils.data.Dataset):
         def __init__(self, base: torch.utils.data.Dataset, idxs: List[int]) -> None:
             self.base = base
@@ -942,7 +944,7 @@ def warmup_monai_cache(
             return len(self.idxs)
 
         def __getitem__(self, i: int) -> int:
-            self.base._load_or_compute_cached_tensors(self.idxs[i])  # type: ignore[attr-defined]
+            self.base._transform(self.idxs[i])  # type: ignore[attr-defined]
             return 0
 
     warmup_ds = _WarmupDataset(base_ds, indices)
