@@ -266,6 +266,13 @@ class TrainArguments:
         default="checkpoints",
         metadata={"help": "Subdirectory under output_dir to store checkpoints."},
     )
+    resume_from_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to checkpoint file to resume training from. "
+            "Will restore epoch, global_step, decoder weights, and optimizer state."
+        },
+    )
 
     # ===== MONAI Persistent Cache Warmup =====
     precache_splits: str = field(
@@ -1366,6 +1373,42 @@ def main() -> None:
     stop_requested = False
     stop_reason = "interrupt"
 
+    # ===== 13.5. RESUME FROM CHECKPOINT (IF SPECIFIED) =====
+    start_epoch = 1  # Default: start from epoch 1
+    if train_args.resume_from_checkpoint:
+        ckpt_path = train_args.resume_from_checkpoint
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+        print(f"[resume] Loading checkpoint from: {ckpt_path}")
+        checkpoint = torch.load(ckpt_path, map_location=device)
+
+        # Restore decoder weights
+        if "decoder_state_dict" in checkpoint:
+            model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+            print(f"[resume] Restored decoder weights")
+        elif "model_state_dict" in checkpoint:
+            # Handle top-k checkpoints (full model)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            print(f"[resume] Restored full model weights")
+
+        # Restore optimizer state
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            print(f"[resume] Restored optimizer state")
+
+        # Restore training progress
+        if "epoch" in checkpoint:
+            current_epoch = checkpoint["epoch"]
+            start_epoch = current_epoch + 1  # Resume from next epoch
+            print(f"[resume] Resuming from epoch {start_epoch} (completed epoch {current_epoch})")
+
+        if "global_step" in checkpoint:
+            global_step = checkpoint["global_step"]
+            print(f"[resume] Restored global_step: {global_step}")
+
+        print(f"[resume] Resume complete. Starting training from epoch {start_epoch}")
+
     # Ensure checkpoint directory exists (used for both top-k and interrupt saves).
     ckpt_dir = os.path.join(train_args.output_dir, train_args.checkpoint_subdir)
 
@@ -1726,7 +1769,7 @@ def main() -> None:
     # ===== 16. MAIN TRAINING LOOP =====
     # Iterate over epochs (full passes through training data)
     try:
-        for epoch in range(1, train_args.num_train_epochs + 1):
+        for epoch in range(start_epoch, train_args.num_train_epochs + 1):
             current_epoch = epoch
             # Run one epoch of training
             train_metrics = run_epoch(train_loader, train=True, split="train", epoch_idx=epoch)
