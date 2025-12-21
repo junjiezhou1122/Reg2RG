@@ -1063,11 +1063,11 @@ def warmup_monai_cache(
     warmup_ds = _WarmupDataset(base_ds, indices)
     loader = DataLoader(
         warmup_ds,
-        batch_size=1,
+        batch_size=2,  # Process 2 items per batch (reduces overhead, uses more RAM)
         shuffle=False,
         num_workers=num_workers,
         pin_memory=False,
-        prefetch_factor=1,
+        prefetch_factor=4,  # Prefetch 4 batches per worker (pipeline I/O + compute)
         persistent_workers=False,
     )
 
@@ -1085,11 +1085,13 @@ def warmup_monai_cache(
     cached_skip = 0
     processed = 0
 
-    for was_cached, _ in iterator:
-        if was_cached.item():
-            cached_skip += 1
-        else:
-            processed += 1
+    for was_cached_batch, _ in iterator:
+        # Handle batched returns (batch_size > 1)
+        for was_cached in was_cached_batch:
+            if was_cached.item():
+                cached_skip += 1
+            else:
+                processed += 1
 
         if show_progress and tqdm is not None:
             iterator.set_postfix(  # type: ignore[attr-defined]
