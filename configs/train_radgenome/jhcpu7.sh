@@ -63,8 +63,9 @@ warmup_steps=20
 lr_scheduler_type="constant_with_warmup"
 # Number of parallel data-loading worker processes
 dataloader_num_workers=4
-# Number of workers for cache warmup (0 = single-process, 8 = 8 parallel workers)
-precache_num_workers=8
+# Number of workers for cache warmup (0 = single-process, 4 = 4 parallel workers)
+# Start with 4 workers - if RAM is sufficient, can increase to 6 or 8
+precache_num_workers=4
 # Log training metrics every N steps
 logging_steps=1
 
