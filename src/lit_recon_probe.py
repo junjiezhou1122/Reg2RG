@@ -1067,7 +1067,7 @@ def warmup_monai_cache(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=False,
-        prefetch_factor=2,  # Reduce from 4 to 2 to save RAM (still gets pipeline benefit)
+        prefetch_factor=1,  # Reduce from 4 to 2 to save RAM (still gets pipeline benefit)
         persistent_workers=False,
     )
 
