@@ -223,6 +223,15 @@ class TrainArguments:
     # Random seed for reproducibility
     seed: int = field(default=42)
 
+    # ===== Device Configuration =====
+    cuda_visible_devices: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Comma-separated list of GPU IDs to use (e.g., '0' or '0,1'). "
+            "If None, uses all available GPUs. Set via CUDA_VISIBLE_DEVICES env var."
+        },
+    )
+
     # Weight for region-specific reconstruction loss
     # Total loss = global_loss + lambda_region * region_loss
     lambda_region: float = field(default=1.0)
@@ -271,6 +280,22 @@ class TrainArguments:
         metadata={
             "help": "Path to checkpoint file to resume training from. "
             "Will restore epoch, global_step, decoder weights, and optimizer state."
+        },
+    )
+
+    # ===== Validation & Early Stopping =====
+    val_check_interval: int = field(
+        default=0,
+        metadata={
+            "help": "Run validation every N training steps (0 = only at epoch end). "
+            "Useful for large datasets to get frequent feedback."
+        },
+    )
+    early_stopping_patience: int = field(
+        default=0,
+        metadata={
+            "help": "Stop training if validation metric doesn't improve for N checks (0 = disabled). "
+            "Works with val_check_interval or epoch-end validation."
         },
     )
 
@@ -1128,14 +1153,24 @@ def main() -> None:
     )
     model_args, data_args, train_args = parser.parse_args_into_dataclasses()
 
-    # ===== 2. SET RANDOM SEEDS =====
+    # ===== 2. SET CUDA DEVICE =====
+    # Set CUDA_VISIBLE_DEVICES environment variable if specified
+    if train_args.cuda_visible_devices is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = train_args.cuda_visible_devices
+        print(f"[device] Setting CUDA_VISIBLE_DEVICES={train_args.cuda_visible_devices}")
+
+    # ===== 3. SET RANDOM SEEDS =====
     # Ensures reproducibility: same seed → same random numbers → same results
     torch.manual_seed(train_args.seed)              # CPU random number generator
     torch.cuda.manual_seed_all(train_args.seed)     # All GPU random number generators
 
-    # ===== 3. DEVICE SETUP =====
+    # ===== 4. DEVICE SETUP =====
     # torch.cuda.is_available(): check if CUDA-capable GPU is available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[device] Using device: {device}")
+    if torch.cuda.is_available():
+        print(f"[device] GPU count: {torch.cuda.device_count()}")
+        print(f"[device] Current GPU: {torch.cuda.current_device()} ({torch.cuda.get_device_name()})")
 
     # Create output directory if it doesn't exist
     # exist_ok=True: don't raise error if directory already exists
@@ -1643,6 +1678,25 @@ def main() -> None:
                     # Reset counter
                     step_in_accum = 0
 
+                    # ===== STEP-LEVEL VALIDATION CHECK =====
+                    # Run validation every N steps if val_check_interval is set
+                    if train_args.val_check_interval > 0:
+                        if global_step - last_val_check_step >= train_args.val_check_interval:
+                            # Temporarily save model state
+                            model.train()  # Ensure we're in train mode before validation
+
+                            # Run validation
+                            run_validation_and_checkpoint(epoch_idx, force_check=False)
+
+                            # Check early stopping
+                            if train_args.early_stopping_patience > 0:
+                                if no_improvement_count >= train_args.early_stopping_patience:
+                                    print(f"[early_stop] 🛑 Stopping training at step {global_step}")
+                                    raise StopIteration  # Break out of nested loops
+
+                            # Return to training mode
+                            model.train()
+
             # ===== LOGGING =====
             # Print progress every N steps during training
             if train and (step + 1) % train_args.log_every == 0:
@@ -1782,16 +1836,100 @@ def main() -> None:
         best_checkpoints = best_checkpoints[:save_top_k]
         print(f"[ckpt] saved {ckpt_path}")
 
+    # ===== 15.6. EARLY STOPPING TRACKER =====
+    best_val_score: Optional[float] = None
+    no_improvement_count = 0
+    last_val_check_step = 0  # Track when we last ran validation
+    if train_args.early_stopping_patience > 0:
+        print(f"[early_stop] Enabled with patience={train_args.early_stopping_patience}, "
+              f"monitoring {monitor_metric} ({monitor_mode})")
+
+    def run_validation_and_checkpoint(epoch: int, force_check: bool = False) -> Dict[str, float]:
+        """
+        Run validation and handle checkpointing and early stopping.
+
+        Args:
+            epoch: Current epoch number
+            force_check: Force validation even if val_check_interval not reached
+
+        Returns:
+            Validation metrics dictionary
+        """
+        nonlocal best_val_score, no_improvement_count, last_val_check_step
+
+        # Check if we should run validation
+        should_validate = force_check
+        if train_args.val_check_interval > 0 and not force_check:
+            if global_step - last_val_check_step >= train_args.val_check_interval:
+                should_validate = True
+
+        if not should_validate:
+            return {}
+
+        # Run validation
+        print(f"[validation] Running validation at step {global_step} (epoch {epoch})")
+        val_metrics = run_epoch(val_loader, train=False, split="val", epoch_idx=epoch)
+        last_val_check_step = global_step
+
+        # Log to W&B
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "val/loss_check": float(val_metrics["loss"]),
+                    "val/mse_check": float(val_metrics["mse"]),
+                    "val/cos_check": float(val_metrics["cos"]),
+                    "val/top1_check": float(val_metrics["top1"]),
+                    "val/reg_cos_check": float(val_metrics["reg_cos"]),
+                    "val/reg_top1_check": float(val_metrics["reg_top1"]),
+                    f"val/{monitor_metric}_check": float(val_metrics.get(monitor_metric, 0.0)),
+                },
+                step=global_step,
+            )
+
+        # Save checkpoint if best
+        train_metrics_dummy = {}  # For checkpointing
+        maybe_save_topk(epoch, train_metrics_dummy, val_metrics)
+
+        # Early stopping check
+        if train_args.early_stopping_patience > 0:
+            current_val_score = float(val_metrics[monitor_metric])
+
+            # Check if this is an improvement
+            is_improvement = False
+            if best_val_score is None:
+                is_improvement = True
+            else:
+                is_improvement = _is_better(current_val_score, best_val_score)
+
+            if is_improvement:
+                best_val_score = current_val_score
+                no_improvement_count = 0
+                print(f"[early_stop] ✅ New best {monitor_metric}={best_val_score:.6f} at step {global_step}")
+            else:
+                no_improvement_count += 1
+                print(f"[early_stop] ⚠️  No improvement for {no_improvement_count} check(s) "
+                      f"(best={best_val_score:.6f}, current={current_val_score:.6f})")
+
+        return val_metrics
+
     # ===== 16. MAIN TRAINING LOOP =====
     # Iterate over epochs (full passes through training data)
+    training_interrupted = False
     try:
         for epoch in range(start_epoch, train_args.num_train_epochs + 1):
             current_epoch = epoch
-            # Run one epoch of training
-            train_metrics = run_epoch(train_loader, train=True, split="train", epoch_idx=epoch)
 
-            # Run one epoch of validation (no gradient updates)
-            val_metrics = run_epoch(val_loader, train=False, split="val", epoch_idx=epoch)
+            # Run one epoch of training
+            try:
+                train_metrics = run_epoch(train_loader, train=True, split="train", epoch_idx=epoch)
+            except StopIteration:
+                # Early stopping triggered during training
+                print(f"[early_stop] Training stopped by early stopping at epoch {epoch}")
+                training_interrupted = True
+                break
+
+            # Run epoch-end validation (always do this, regardless of val_check_interval)
+            val_metrics = run_validation_and_checkpoint(epoch, force_check=True)
 
             # Print epoch summary
             print(
@@ -1823,8 +1961,12 @@ def main() -> None:
                     step=global_step,
                 )
 
-            # Save best checkpoints (top-k by chosen validation metric)
-            maybe_save_topk(epoch, train_metrics, val_metrics)
+            # Check early stopping (epoch-level)
+            if train_args.early_stopping_patience > 0:
+                if no_improvement_count >= train_args.early_stopping_patience:
+                    print(f"[early_stop] 🛑 Stopping training: no improvement for {train_args.early_stopping_patience} validation(s)")
+                    training_interrupted = True
+                    break
 
             # ===== 17. LOG METRICS TO CSV =====
             # Append mode: add to end of file without overwriting
