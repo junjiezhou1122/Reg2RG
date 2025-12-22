@@ -1153,18 +1153,12 @@ def main() -> None:
     )
     model_args, data_args, train_args = parser.parse_args_into_dataclasses()
 
-    # ===== 2. SET CUDA DEVICE =====
-    # Set CUDA_VISIBLE_DEVICES environment variable if specified
-    if train_args.cuda_visible_devices is not None:
-        os.environ['CUDA_VISIBLE_DEVICES'] = train_args.cuda_visible_devices
-        print(f"[device] Setting CUDA_VISIBLE_DEVICES={train_args.cuda_visible_devices}")
-
-    # ===== 3. SET RANDOM SEEDS =====
+    # ===== 2. SET RANDOM SEEDS =====
     # Ensures reproducibility: same seed → same random numbers → same results
     torch.manual_seed(train_args.seed)              # CPU random number generator
     torch.cuda.manual_seed_all(train_args.seed)     # All GPU random number generators
 
-    # ===== 4. DEVICE SETUP =====
+    # ===== 3. DEVICE SETUP =====
     # torch.cuda.is_available(): check if CUDA-capable GPU is available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[device] Using device: {device}")
