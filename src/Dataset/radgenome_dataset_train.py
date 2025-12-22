@@ -176,19 +176,35 @@ class RobustPersistentDataset(PersistentDataset):
         # Use MONAI's internal hashing function
         hash_val = self.hash_func(item)
 
-        # Fix: Ensure hash_val is a proper string (not bytes with b'...' literal)
+        # Defensive fix: Normalize hash_val to a clean hex string
         if isinstance(hash_val, bytes):
-            hash_val = hash_val.hex()  # Convert bytes to hex string
-        elif not isinstance(hash_val, str):
-            hash_val = str(hash_val)  # Fallback for other types
+            # Case 1: bytes object → convert to hex string
+            hash_val = hash_val.hex()
+        elif isinstance(hash_val, str):
+            # Case 2: already a string
+            # Check if it's a clean hex string (only 0-9a-f characters)
+            if not all(c in '0123456789abcdefABCDEF' for c in hash_val):
+                # Not a hex string - this shouldn't happen, but handle it
+                # Convert string to bytes then to hex
+                hash_val = hash_val.encode('utf-8').hex()
+        else:
+            # Case 3: other type (shouldn't happen, but be safe)
+            hash_val = str(hash_val).encode('utf-8').hex()
 
         # Add transform hash if available
         if hasattr(self, 'hash_transform') and self.hash_transform is not None:
             transform_hash = self.hash_transform(self.transform)
-            # Ensure transform hash is also a string
+
+            # Normalize transform_hash the same way
             if isinstance(transform_hash, bytes):
                 transform_hash = transform_hash.hex()
-            hash_val += str(transform_hash)
+            elif isinstance(transform_hash, str):
+                if not all(c in '0123456789abcdefABCDEF' for c in transform_hash):
+                    transform_hash = transform_hash.encode('utf-8').hex()
+            else:
+                transform_hash = str(transform_hash).encode('utf-8').hex()
+
+            hash_val += transform_hash
 
         return os.path.join(self.cache_dir, f"{hash_val}.pt")
     
