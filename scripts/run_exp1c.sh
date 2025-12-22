@@ -93,7 +93,7 @@ echo ""
 
 START_TIME=$(date +%s)
 
-python src/lit_recon_probe.py \
+CUDA_VISIBLE_DEVICES="$CUDA_DEVICE" python src/lit_recon_probe.py \
     --decoder_layers "$DECODER_LAYERS" \
     --num_train_epochs "$NUM_EPOCHS" \
     --batch_size "$BATCH_SIZE" \
@@ -103,7 +103,6 @@ python src/lit_recon_probe.py \
     --output_dir "$OUTPUT_DIR" \
     --val_check_interval "$VAL_CHECK_INTERVAL" \
     --early_stopping_patience "$EARLY_STOPPING_PATIENCE" \
-    --cuda_visible_devices "$CUDA_DEVICE" \
     --use_wandb "$USE_WANDB" \
     --wandb_project "$WANDB_PROJECT" \
     --wandb_run_name "$WANDB_RUN_NAME" \
