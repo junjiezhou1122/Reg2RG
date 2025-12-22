@@ -1067,7 +1067,7 @@ def warmup_monai_cache(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=False,
-        prefetch_factor=1,  # Reduce from 4 to 2 to save RAM (still gets pipeline benefit)
+        prefetch_factor=1,  
         persistent_workers=False,
     )
 
@@ -1651,13 +1651,28 @@ def main() -> None:
                     f"cos={cos_g:.4f} reg_cos={agg['reg_cos'] / max(1, agg['reg_count']):.4f}"
                 )
                 if wandb_run is not None:
+                    # Calculate current batch reg_cos (instant value)
+                    current_reg_cos = sum(reg_cos) / len(reg_cos) if reg_cos else 0.0
+
                     wandb_run.log(
                         {
+                            # Instant values (current batch) - for observing training dynamics
                             "train/loss_step": float(loss_total.item()),
+                            "train/mse_step": float(mse_g),
                             "train/cos_step": float(cos_g),
-                            "train/reg_cos_running": float(
-                                agg["reg_cos"] / max(1, agg["reg_count"])
-                            ),
+                            "train/top1_step": float(top1_g),
+                            "train/reg_cos_step": float(current_reg_cos),
+                            "train/reg_top1_step": float(sum(reg_top1) / len(reg_top1) if reg_top1 else 0.0),
+
+                            # Cumulative averages (from epoch start) - for smooth trends
+                            "train/loss_running": float(agg["loss"] / max(1, agg["count"])),
+                            "train/mse_running": float(agg["mse"] / max(1, agg["count"])),
+                            "train/cos_running": float(agg["cos"] / max(1, agg["count"])),
+                            "train/top1_running": float(agg["top1"] / max(1, agg["count"])),
+                            "train/reg_cos_running": float(agg["reg_cos"] / max(1, agg["reg_count"])),
+                            "train/reg_top1_running": float(agg["reg_top1"] / max(1, agg["reg_count"])),
+
+                            # Learning rate
                             "train/lr": float(optimizer.param_groups[0]["lr"]),
                         },
                         step=global_step,

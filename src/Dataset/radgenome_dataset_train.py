@@ -175,9 +175,21 @@ class RobustPersistentDataset(PersistentDataset):
         """Get the cache filename for an item (uses MONAI's hashing)."""
         # Use MONAI's internal hashing function
         hash_val = self.hash_func(item)
+
+        # Fix: Ensure hash_val is a proper string (not bytes with b'...' literal)
+        if isinstance(hash_val, bytes):
+            hash_val = hash_val.hex()  # Convert bytes to hex string
+        elif not isinstance(hash_val, str):
+            hash_val = str(hash_val)  # Fallback for other types
+
         # Add transform hash if available
         if hasattr(self, 'hash_transform') and self.hash_transform is not None:
-            hash_val += self.hash_transform(self.transform)
+            transform_hash = self.hash_transform(self.transform)
+            # Ensure transform hash is also a string
+            if isinstance(transform_hash, bytes):
+                transform_hash = transform_hash.hex()
+            hash_val += str(transform_hash)
+
         return os.path.join(self.cache_dir, f"{hash_val}.pt")
     
     def cache_exists(self, index: int, deep_check: bool = False) -> bool:
