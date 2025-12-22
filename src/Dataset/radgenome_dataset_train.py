@@ -176,34 +176,23 @@ class RobustPersistentDataset(PersistentDataset):
         # Use MONAI's internal hashing function
         hash_val = self.hash_func(item)
 
-        # Defensive fix: Normalize hash_val to a clean hex string
+        # Fix: MONAI's hash_func returns bytes that represent an ASCII hex string
+        # We need to decode it, not convert it to hex again (which would double-encode)
         if isinstance(hash_val, bytes):
-            # Case 1: bytes object → convert to hex string
-            hash_val = hash_val.hex()
-        elif isinstance(hash_val, str):
-            # Case 2: already a string
-            # Check if it's a clean hex string (only 0-9a-f characters)
-            if not all(c in '0123456789abcdefABCDEF' for c in hash_val):
-                # Not a hex string - this shouldn't happen, but handle it
-                # Convert string to bytes then to hex
-                hash_val = hash_val.encode('utf-8').hex()
-        else:
-            # Case 3: other type (shouldn't happen, but be safe)
-            hash_val = str(hash_val).encode('utf-8').hex()
+            # Decode bytes to string (MONAI returns hex string as bytes)
+            hash_val = hash_val.decode('ascii')
+        elif not isinstance(hash_val, str):
+            # Fallback: convert to string if it's some other type
+            hash_val = str(hash_val)
 
         # Add transform hash if available
         if hasattr(self, 'hash_transform') and self.hash_transform is not None:
             transform_hash = self.hash_transform(self.transform)
-
             # Normalize transform_hash the same way
             if isinstance(transform_hash, bytes):
-                transform_hash = transform_hash.hex()
-            elif isinstance(transform_hash, str):
-                if not all(c in '0123456789abcdefABCDEF' for c in transform_hash):
-                    transform_hash = transform_hash.encode('utf-8').hex()
-            else:
-                transform_hash = str(transform_hash).encode('utf-8').hex()
-
+                transform_hash = transform_hash.decode('ascii')
+            elif not isinstance(transform_hash, str):
+                transform_hash = str(transform_hash)
             hash_val += transform_hash
 
         return os.path.join(self.cache_dir, f"{hash_val}.pt")
