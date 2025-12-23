@@ -172,30 +172,47 @@ class RobustPersistentDataset(PersistentDataset):
         return result
     
     def _get_hashfile(self, item):
-        """Get the cache filename for an item (uses MONAI's hashing)."""
+        """
+        Get the cache filename for an item (uses MONAI's hashing).
+
+        Supports both old and new cache filename formats for backward compatibility:
+        - Old format: b'xxx'.pt (str() of bytes object)
+        - New format: xxx.pt (decoded hex string)
+        """
         # Use MONAI's internal hashing function
         hash_val = self.hash_func(item)
 
-        # Fix: MONAI's hash_func returns bytes that represent an ASCII hex string
-        # We need to decode it, not convert it to hex again (which would double-encode)
+        # Generate both possible hash formats
+        hash_old = str(hash_val)  # Old: b'xxx'
+
         if isinstance(hash_val, bytes):
-            # Decode bytes to string (MONAI returns hex string as bytes)
-            hash_val = hash_val.decode('ascii')
-        elif not isinstance(hash_val, str):
-            # Fallback: convert to string if it's some other type
-            hash_val = str(hash_val)
+            hash_new = hash_val.decode('ascii')  # New: xxx
+        else:
+            hash_new = str(hash_val)
 
         # Add transform hash if available
         if hasattr(self, 'hash_transform') and self.hash_transform is not None:
             transform_hash = self.hash_transform(self.transform)
-            # Normalize transform_hash the same way
+            transform_hash_old = str(transform_hash)
             if isinstance(transform_hash, bytes):
-                transform_hash = transform_hash.decode('ascii')
-            elif not isinstance(transform_hash, str):
-                transform_hash = str(transform_hash)
-            hash_val += transform_hash
+                transform_hash_new = transform_hash.decode('ascii')
+            else:
+                transform_hash_new = str(transform_hash)
 
-        return os.path.join(self.cache_dir, f"{hash_val}.pt")
+            hash_old += transform_hash_old
+            hash_new += transform_hash_new
+
+        # Try both formats - prefer new format, fallback to old
+        path_new = os.path.join(self.cache_dir, f"{hash_new}.pt")
+        path_old = os.path.join(self.cache_dir, f"{hash_old}.pt")
+
+        # Return whichever exists, or new format for writing
+        if os.path.exists(path_new):
+            return path_new
+        elif os.path.exists(path_old):
+            return path_old
+        else:
+            return path_new  # Use new format for new files
     
     def cache_exists(self, index: int, deep_check: bool = False) -> bool:
         """
