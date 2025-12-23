@@ -93,22 +93,37 @@ echo ""
 
 START_TIME=$(date +%s)
 
-CUDA_VISIBLE_DEVICES="$CUDA_DEVICE" python src/lit_recon_probe.py \
+CUDA_VISIBLE_DEVICES="$CUDA_DEVICE" python3 src/lit_recon_probe.py \
+    --tokenizer_path /mnt/home/zhoujunjie/models/Llama-2-7b-chat-hf \
+    --pretrained_visual_encoder /mnt/home/zhoujunjie/models/Reg2RG/RadFM_vit3d.pth \
+    --pretrained_adapter /mnt/home/zhoujunjie/models/Reg2RG/RadFM_perceiver_fc.pth \
+    --decode_mode pre_proj \
+    --data_folder /mnt2/ct/RadGenome-ChestCT/dataset/train_preprocessed \
+    --mask_folder /mnt2/ct/RadGenome-ChestCT/dataset/train_region_mask \
+    --report_file /mnt2/ct/RadGenome-ChestCT/dataset/radgenome_files/train_region_report.csv \
+    --val_data_folder /mnt2/ct/RadGenome-ChestCT/dataset/valid_preprocessed \
+    --val_mask_folder /mnt2/ct/RadGenome-ChestCT/dataset/valid_region_mask \
+    --val_report_file /mnt2/ct/RadGenome-ChestCT/dataset/radgenome_files/validation_region_report.csv \
+    --monai_cache_dir "$CACHE_DIR" \
     --decoder_layers "$DECODER_LAYERS" \
+    --output_dir "$OUTPUT_DIR" \
     --num_train_epochs "$NUM_EPOCHS" \
     --batch_size "$BATCH_SIZE" \
     --gradient_accumulation_steps "$GRAD_ACCUM_STEPS" \
     --learning_rate "$LEARNING_RATE" \
     --dataloader_num_workers "$NUM_WORKERS" \
-    --output_dir "$OUTPUT_DIR" \
+    --log_every 10 \
     --val_check_interval "$VAL_CHECK_INTERVAL" \
     --early_stopping_patience "$EARLY_STOPPING_PATIENCE" \
+    --save_top_k 3 \
+    --monitor_metric reg_cos \
+    --monitor_mode max \
+    --precache_splits none \
+    --seed 42 \
     --use_wandb "$USE_WANDB" \
     --wandb_project "$WANDB_PROJECT" \
     --wandb_run_name "$WANDB_RUN_NAME" \
-    --save_top_k 3 \
-    --monitor_metric "reg_cos" \
-    --monitor_mode "max" \
+    --wandb_mode online \
     2>&1 | tee "$LOG_FILE"
 
 EXIT_CODE=${PIPESTATUS[0]}
