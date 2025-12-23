@@ -1430,8 +1430,19 @@ def main() -> None:
         # Restore training progress
         if "epoch" in checkpoint:
             current_epoch = checkpoint["epoch"]
-            start_epoch = current_epoch + 1  # Resume from next epoch
-            print(f"[resume] Resuming from epoch {start_epoch} (completed epoch {current_epoch})")
+
+            # Check if this is an interrupt checkpoint (epoch not completed)
+            # or a regular checkpoint (epoch completed)
+            is_interrupt = "reason" in checkpoint or "interrupt" in ckpt_path.lower()
+
+            if is_interrupt:
+                # Interrupt checkpoint: continue current epoch
+                start_epoch = current_epoch
+                print(f"[resume] Interrupt detected. Continuing epoch {start_epoch} from step {checkpoint.get('global_step', 0)}")
+            else:
+                # Regular checkpoint: start next epoch
+                start_epoch = current_epoch + 1
+                print(f"[resume] Resuming from epoch {start_epoch} (completed epoch {current_epoch})")
 
         if "global_step" in checkpoint:
             global_step = checkpoint["global_step"]
