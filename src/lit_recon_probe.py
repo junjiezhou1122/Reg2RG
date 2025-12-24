@@ -236,6 +236,16 @@ class TrainArguments:
     # Total loss = global_loss + lambda_region * region_loss
     lambda_region: float = field(default=1.0)
 
+    # ===== Experiment 2: Joint Adapter-Decoder Training =====
+    train_adapter: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to unlock adapter for joint training with decoder (Exp2). "
+            "When True, both adapter and decoder are trainable. "
+            "When False (default), only decoder is trainable (Exp1 baseline)."
+        },
+    )
+
     # ===== Experiment Tracking (Weights & Biases) =====
     use_wandb: bool = field(
         default=False,
@@ -1377,18 +1387,37 @@ def main() -> None:
     model.to(device)
 
     # ===== 11. FREEZE PRETRAINED COMPONENTS =====
-    # Only train the decoder; freeze encoder, adapter, and projection
-    # This tests if information is linearly accessible (probe can't modify features)
-    set_requires_grad(model.vision_encoder, False)  # Freeze ViT
-    set_requires_grad(model.adapter, False)         # Freeze Perceiver
-    set_requires_grad(model.fc, False)              # Freeze projection
-    set_requires_grad(model.decoder, True)          # Train decoder only
+    # Exp1 (baseline): Train decoder only, freeze everything else
+    # Exp2 (joint training): Train adapter + decoder, freeze encoder + fc
+    set_requires_grad(model.vision_encoder, False)           # Always freeze ViT ❄️
+    set_requires_grad(model.adapter, train_args.train_adapter)  # Unlock if Exp2 🔥/❄️
+    set_requires_grad(model.fc, False)                       # Always freeze projection ❄️
+    set_requires_grad(model.decoder, True)                   # Always train decoder 🔥
+
+    if train_args.train_adapter:
+        print("[INFO] 🔥 Exp2 Mode: Training BOTH adapter + decoder (joint training)")
+    else:
+        print("[INFO] ❄️ Exp1 Mode: Training decoder ONLY (adapter frozen)")
+
 
     # ===== 12. OPTIMIZER SETUP =====
     # AdamW: Adam optimizer with weight decay (L2 regularization)
-    # Only optimize decoder parameters (others are frozen)
+    # Exp1: Only decoder parameters
+    # Exp2: Adapter + decoder parameters (joint training)
+    if train_args.train_adapter:
+        # Joint training: optimize both adapter and decoder
+        trainable_params = list(model.adapter.parameters()) + list(model.decoder.parameters())
+        num_adapter_params = sum(p.numel() for p in model.adapter.parameters())
+        num_decoder_params = sum(p.numel() for p in model.decoder.parameters())
+        print(f"[INFO] Training {num_adapter_params:,} adapter params + {num_decoder_params:,} decoder params")
+    else:
+        # Baseline: only decoder
+        trainable_params = list(model.decoder.parameters())
+        num_decoder_params = sum(p.numel() for p in model.decoder.parameters())
+        print(f"[INFO] Training {num_decoder_params:,} decoder params only")
+
     optimizer = torch.optim.AdamW(
-        model.decoder.parameters(),          # Only decoder parameters
+        trainable_params,
         lr=train_args.learning_rate,         # Learning rate
         weight_decay=train_args.weight_decay  # L2 regularization strength
     )
@@ -1421,6 +1450,11 @@ def main() -> None:
             # Handle top-k checkpoints (full model)
             model.load_state_dict(checkpoint["model_state_dict"])
             print(f"[resume] Restored full model weights")
+
+        # Restore adapter weights if training adapter (Exp2)
+        if train_args.train_adapter and "adapter_state_dict" in checkpoint:
+            model.adapter.load_state_dict(checkpoint["adapter_state_dict"])
+            print(f"[resume] Restored adapter weights (Exp2 joint training)")
 
         # Restore optimizer state
         if "optimizer_state_dict" in checkpoint:
@@ -1464,19 +1498,24 @@ def main() -> None:
         ckpt_path = os.path.join(
             ckpt_dir, f"interrupt_epoch={current_epoch:03d}_step={global_step}_{reason}_{ts}.pt"
         )
-        torch.save(
-            {
-                "epoch": current_epoch,
-                "global_step": global_step,
-                "reason": reason,
-                "decoder_state_dict": model.decoder.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "model_args": vars(model_args),
-                "data_args": vars(data_args),
-                "train_args": vars(train_args),
-            },
-            ckpt_path,
-        )
+
+        # Build checkpoint dict
+        ckpt_dict = {
+            "epoch": current_epoch,
+            "global_step": global_step,
+            "reason": reason,
+            "decoder_state_dict": model.decoder.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "model_args": vars(model_args),
+            "data_args": vars(data_args),
+            "train_args": vars(train_args),
+        }
+
+        # Save adapter weights if we're training it (Exp2)
+        if train_args.train_adapter:
+            ckpt_dict["adapter_state_dict"] = model.adapter.state_dict()
+
+        torch.save(ckpt_dict, ckpt_path)
         print(f"[ckpt] interrupt checkpoint saved: {ckpt_path}")
         return ckpt_path
 
