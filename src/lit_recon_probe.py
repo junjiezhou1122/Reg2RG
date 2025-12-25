@@ -38,6 +38,10 @@ except ImportError:  # pragma: no cover
 from Dataset.radgenome_dataset_train import RadGenomeDataset_Train
 # Perceiver Resampler: compresses variable-length sequences to fixed-length
 from Model.helpers import PerceiverResampler
+# 1-layer adapter for minimal-capacity probing (Experiment 5)
+from Model.one_layer_adapter import OneLayerAdapter
+# Adapter weight loading utilities (Experiment 5a)
+from Model.adapter_utils import load_first_layer_from_6layer_checkpoint
 # 3D positional encodings for volumetric data
 from Model.position_encoding import PositionEmbeddingLearned3d
 # 3D Vision Transformer for processing CT volumes
@@ -129,6 +133,32 @@ class ModelArguments:
     # Feed-forward network expansion factor in decoder
     # FFN hidden dimension = decoder_ff_mult * vis_dim
     decoder_ff_mult: int = field(default=4, metadata={"help": "Decoder FFN multiplier."})
+
+    # ===== Experiment 5: Minimal-Capacity Adapter =====
+    adapter_depth: int = field(
+        default=6,
+        metadata={
+            "help": "Adapter depth (1 for minimal-capacity Exp5, 6 for baseline). "
+            "When set to 1, uses OneLayerAdapter instead of PerceiverResampler."
+        }
+    )
+
+    load_first_layer_from_pretrained: bool = field(
+        default=False,
+        metadata={
+            "help": "Load 1st layer from 6-layer checkpoint (Exp5a). "
+            "Only applies when adapter_depth=1. "
+            "Extracts first layer weights from pretrained 6-layer Perceiver."
+        }
+    )
+
+    random_init_adapter: bool = field(
+        default=False,
+        metadata={
+            "help": "Randomly initialize adapter, ignore pretrained weights (Exp5b). "
+            "Use this to test fresh 1-layer adapter training from scratch."
+        }
+    )
 
 
 @dataclass
@@ -667,6 +697,7 @@ class LITProbeModel(nn.Module):
         decoder_heads: int,     # Decoder attention heads (8)
         decoder_ff_mult: int,   # Decoder FFN multiplier (4)
         decode_mode: str,       # "pre_proj" or "post_proj"
+        adapter_depth: int = 6, # Adapter depth (6 for Perceiver, 1 for OneLayer)
     ):
         """Initialize all model components."""
         super().__init__()
@@ -679,6 +710,7 @@ class LITProbeModel(nn.Module):
         self.vis_dim = vis_dim
         self.llm_dim = llm_dim
         self.decode_mode = decode_mode  # Where to decode from
+        self.adapter_depth = adapter_depth  # Store for reference
 
         # ===== 1. VISION ENCODER (3D ViT) =====
         # Processes 3D CT volumes into token sequences
@@ -695,12 +727,26 @@ class LITProbeModel(nn.Module):
             emb_dropout=0.1,                     # Embedding dropout rate
         )
 
-        # ===== 2. ADAPTER (Perceiver Resampler) =====
+        # ===== 2. ADAPTER (Perceiver Resampler or OneLayer) =====
         # Compresses variable-length token sequence to fixed number of latents
-        self.adapter = PerceiverResampler(
-            dim=vis_dim,                # Input/output dimension
-            num_latents=perceiver_num   # Number of latent tokens (compression target)
-        )
+        # Choice depends on adapter_depth:
+        #   - depth=6: Use PerceiverResampler (baseline, 6 layers of refinement)
+        #   - depth=1: Use OneLayerAdapter (minimal-capacity probe, Exp5)
+        if adapter_depth == 1:
+            print(f"[INFO] 🔬 Using 1-layer adapter (minimal-capacity probe)")
+            self.adapter = OneLayerAdapter(
+                dim=vis_dim,
+                num_latents=perceiver_num,
+                heads=8,
+                ff_mult=4
+            )
+        else:
+            print(f"[INFO] Using {adapter_depth}-layer Perceiver Resampler")
+            self.adapter = PerceiverResampler(
+                dim=vis_dim,
+                depth=adapter_depth,
+                num_latents=perceiver_num
+            )
 
         # ===== 3. PROJECTION LAYER =====
         # Projects from vision space to LLM embedding space
@@ -1358,6 +1404,7 @@ def main() -> None:
         decoder_heads=model_args.decoder_heads,    # Decoder attention heads
         decoder_ff_mult=model_args.decoder_ff_mult,  # Decoder FFN multiplier
         decode_mode=model_args.decode_mode,        # "pre_proj" or "post_proj"
+        adapter_depth=model_args.adapter_depth,    # Adapter depth (NEW for Exp5)
     )
 
     # ===== 8. LOAD PRETRAINED VISION ENCODER =====
@@ -1372,15 +1419,48 @@ def main() -> None:
 
     # ===== 9. LOAD PRETRAINED ADAPTER AND PROJECTION =====
     if model_args.pretrained_adapter and model_args.use_pretrained_adapter:
-        adapter_ckpt = torch.load(model_args.pretrained_adapter, map_location="cpu")
 
-        # Load Perceiver adapter weights
-        if "perceiver" in adapter_ckpt:
-            model.adapter.load_state_dict(adapter_ckpt["perceiver"])
+        # Case 1: Exp5b - Random initialization (skip pretrained weights)
+        if model_args.random_init_adapter:
+            print("[INFO] ❄️  Adapter randomly initialized (no pretrained weights)")
+            print("[INFO] 🧪 Exp5b: Training fresh 1-layer adapter from scratch")
 
-        # Load projection layer weights (only for post_proj mode)
-        if model_args.decode_mode == "post_proj" and "fc" in adapter_ckpt:
-            model.fc.load_state_dict(adapter_ckpt["fc"])
+        # Case 2: Exp5a - Extract first layer from 6-layer checkpoint
+        elif model_args.adapter_depth == 1 and model_args.load_first_layer_from_pretrained:
+            print("[INFO] 🧪 Exp5a: Loading 1st layer from 6-layer checkpoint")
+            load_first_layer_from_6layer_checkpoint(
+                model.adapter,
+                model_args.pretrained_adapter
+            )
+            # Also load projection layer if needed
+            if model_args.decode_mode == "post_proj":
+                adapter_ckpt = torch.load(model_args.pretrained_adapter, map_location="cpu")
+                if "fc" in adapter_ckpt:
+                    model.fc.load_state_dict(adapter_ckpt["fc"])
+                    print("[INFO] ✓ Loaded projection layer (fc)")
+
+        # Case 3: Normal - Load full adapter checkpoint (6-layer or matching depth)
+        else:
+            adapter_ckpt = torch.load(model_args.pretrained_adapter, map_location="cpu")
+
+            # Load adapter weights
+            if "perceiver" in adapter_ckpt:
+                if model_args.adapter_depth == 6:
+                    print("[INFO] Loading full 6-layer Perceiver checkpoint")
+                    model.adapter.load_state_dict(adapter_ckpt["perceiver"])
+                else:
+                    print(f"[WARN] adapter_depth={model_args.adapter_depth} but loading 6-layer checkpoint")
+                    print("[WARN] Weight shapes may not match. Consider using --random_init_adapter")
+                    try:
+                        model.adapter.load_state_dict(adapter_ckpt["perceiver"], strict=False)
+                    except RuntimeError as e:
+                        print(f"[ERROR] Failed to load adapter weights: {e}")
+                        print("[INFO] Continuing with random initialization")
+
+            # Load projection layer (same for all cases)
+            if model_args.decode_mode == "post_proj" and "fc" in adapter_ckpt:
+                model.fc.load_state_dict(adapter_ckpt["fc"])
+                print("[INFO] ✓ Loaded projection layer (fc)")
 
     # ===== 10. MOVE MODEL TO GPU =====
     # .to(device): transfer all model parameters to specified device (CPU/GPU)
