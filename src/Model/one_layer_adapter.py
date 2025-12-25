@@ -55,7 +55,7 @@ class OneLayerAdapter(nn.Module):
         (B, T, num_latents, D) - compressed latent representation
     """
 
-    def __init__(self, dim=768, num_latents=32, heads=8, ff_mult=4):
+    def __init__(self, dim=768, num_latents=32, heads=8, dim_head=64, ff_mult=4):
         super().__init__()
 
         # Store configuration
@@ -77,8 +77,8 @@ class OneLayerAdapter(nn.Module):
         self.norm_latents = nn.LayerNorm(dim)   # Normalize query latents
 
         # Attention configuration
-        dim_head = dim // heads
-        inner_dim = dim_head * heads
+        # IMPORTANT: dim_head=64 must match PerceiverAttention to load pretrained weights
+        inner_dim = dim_head * heads  # = 64 * 8 = 512
         self.scale = dim_head ** -0.5  # Scaling factor for attention scores
 
         # Cross-attention projections

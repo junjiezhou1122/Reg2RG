@@ -738,6 +738,7 @@ class LITProbeModel(nn.Module):
                 dim=vis_dim,
                 num_latents=perceiver_num,
                 heads=8,
+                dim_head=64,  # Must match PerceiverAttention for weight loading
                 ff_mult=4
             )
         else:
