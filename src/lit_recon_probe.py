@@ -46,6 +46,8 @@ from Model.adapter_utils import load_first_layer_from_6layer_checkpoint
 from Model.position_encoding import PositionEmbeddingLearned3d
 # 3D Vision Transformer for processing CT volumes
 from Model.vit_3d import ViT
+# Unified configuration (HuggingFace-compatible Arguments)
+from config import ModelArguments, DataArguments, TrainArguments
 
 
 # ============================================================================
@@ -68,318 +70,8 @@ REGIONS = [
 ]
 
 
-# ============================================================================
-# CONFIGURATION CLASSES
-# ============================================================================
-
-@dataclass  # Decorator that auto-generates __init__, __repr__, etc.
-class ModelArguments:
-    """
-    Model architecture and pretrained weights configuration.
-
-    This dataclass holds all hyperparameters that define the model structure
-    and paths to pretrained checkpoints.
-    """
-
-    # Path to tokenizer (used for text preprocessing in the full pipeline)
-    # field() allows setting default values and metadata
-    tokenizer_path: str = field(
-        default="/mnt/home/zhoujunjie/models/Llama-2-7b-chat-hf",
-        metadata={"help": "Path to the tokenizer (for dataset preprocessing)."},
-    )
-
-    # Path to pretrained 3D ViT encoder weights
-    # These weights are frozen during training to test information preservation
-    pretrained_visual_encoder: str = field(
-        default="/mnt/home/zhoujunjie/models/Reg2RG/RadFM_vit3d.pth",
-        metadata={"help": "Path to pretrained ViT3D weights."},
-    )
-
-    # Path to pretrained Perceiver adapter and projection layer weights
-    pretrained_adapter: str = field(
-        default="/mnt/home/zhoujunjie/models/Reg2RG/RadFM_perceiver_fc.pth",
-        metadata={"help": "Path to pretrained Perceiver adapter weights."},
-    )
-
-    # Whether to load pretrained adapter weights
-    use_pretrained_adapter: bool = field(
-        default=True,
-        metadata={"help": "Load pretrained Perceiver weights if available."},
-    )
-
-    # Decode mode: where to decode from in the pipeline
-    # "pre_proj": decode from Perceiver output (before projection to LLM space)
-    # "post_proj": decode from projected representation (after FC layer)
-    decode_mode: str = field(
-        default="pre_proj",
-        metadata={"help": "Decode from 'pre_proj' (Z) or 'post_proj' (fc(Z))."},
-    )
-
-    # Number of latent tokens in Perceiver output (compressed representation size)
-    perceiver_num: int = field(default=32, metadata={"help": "Latent token count."})
-
-    # Dimension of ViT token embeddings (input to Perceiver)
-    vis_dim: int = field(default=768, metadata={"help": "ViT token dimension."})
-
-    # Dimension of LLM embeddings (output of projection layer)
-    llm_dim: int = field(default=4096, metadata={"help": "Projection output dimension."})
-
-    # Number of transformer layers in the reconstruction decoder
-    decoder_layers: int = field(default=2, metadata={"help": "Decoder depth."})
-
-    # Number of attention heads in decoder layers
-    decoder_heads: int = field(default=8, metadata={"help": "Decoder heads."})
-
-    # Feed-forward network expansion factor in decoder
-    # FFN hidden dimension = decoder_ff_mult * vis_dim
-    decoder_ff_mult: int = field(default=4, metadata={"help": "Decoder FFN multiplier."})
-
-    # ===== Experiment 5: Minimal-Capacity Adapter =====
-    adapter_depth: int = field(
-        default=6,
-        metadata={
-            "help": "Adapter depth (1 for minimal-capacity Exp5, 6 for baseline). "
-            "When set to 1, uses OneLayerAdapter instead of PerceiverResampler."
-        }
-    )
-
-    load_first_layer_from_pretrained: bool = field(
-        default=False,
-        metadata={
-            "help": "Load 1st layer from 6-layer checkpoint (Exp5a). "
-            "Only applies when adapter_depth=1. "
-            "Extracts first layer weights from pretrained 6-layer Perceiver."
-        }
-    )
-
-    random_init_adapter: bool = field(
-        default=False,
-        metadata={
-            "help": "Randomly initialize adapter, ignore pretrained weights (Exp5b). "
-            "Use this to test fresh 1-layer adapter training from scratch."
-        }
-    )
-
-    # ===== Experiment 9: Separate Global/Local Adapters =====
-    separate_adapters: bool = field(
-        default=False,
-        metadata={
-            "help": "Use separate adapters for global and local paths (Exp9). "
-            "When True, creates two independent 1-layer adapters: "
-            "global_adapter for whole image, local_adapter for region crops. "
-            "Each has its own decoder. Requires adapter_depth=1."
-        }
-    )
-
-
-@dataclass
-class DataArguments:
-    """
-    Dataset paths and data loading configuration.
-
-    Specifies where to find CT scans, region masks, and reports.
-    """
-
-    # Directory containing preprocessed CT scan volumes
-    data_folder: str = field(
-        default="/mnt2/ct/RadGenome-ChestCT/dataset/train_preprocessed"
-    )
-
-    # Directory containing binary masks for anatomical regions
-    mask_folder: str = field(
-        default="/mnt2/ct/RadGenome-ChestCT/dataset/train_region_mask"
-    )
-
-    # CSV file with region-specific radiology reports
-    report_file: str = field(
-        default="/mnt2/ct/RadGenome-ChestCT/dataset/radgenome_files/train_region_report.csv"
-    )
-
-    # Optional: dedicated validation set paths (preferred over splitting train)
-    val_data_folder: Optional[str] = field(
-        default=None,
-        metadata={"help": "Validation CT volume directory. If set, do not split train."},
-    )
-    val_mask_folder: Optional[str] = field(
-        default=None,
-        metadata={"help": "Validation region mask directory. If set, do not split train."},
-    )
-    val_report_file: Optional[str] = field(
-        default=None,
-        metadata={"help": "Validation report CSV. If set, do not split train."},
-    )
-
-    # Directory for MONAI dataset caching (speeds up data loading)
-    monai_cache_dir: str = field(default="/mnt2/ct/RadGenome-ChestCT/cache")
-
-    # Fraction of train data to use for validation (used only if val_* not set)
-    val_split: float = field(
-        default=0.05,
-        metadata={"help": "Fraction of data used for validation."},
-    )
-
-
-@dataclass
-class TrainArguments:
-    """
-    Training hyperparameters and logging configuration.
-
-    Controls the training process: learning rate, epochs, batch size, etc.
-    """
-
-    # Directory to save training metrics and model checkpoints
-    output_dir: str = field(
-        default="/mnt/home/zhoujunjie/outputs/LIT",
-        metadata={"help": "Where to write metrics and checkpoints."},
-    )
-
-    # Total number of training epochs (full passes through dataset)
-    num_train_epochs: int = field(default=15)
-
-    # Learning rate for AdamW optimizer
-    learning_rate: float = field(default=1e-4)
-
-    # Weight decay for L2 regularization in optimizer
-    weight_decay: float = field(default=0.01)
-
-    # Number of samples processed together in each training step
-    batch_size: int = field(default=1)
-
-    # Number of parallel workers for data loading
-    dataloader_num_workers: int = field(default=4)
-
-    # Number of steps to accumulate gradients before updating weights
-    # Effective batch size = batch_size * gradient_accumulation_steps
-    gradient_accumulation_steps: int = field(default=8)
-
-    # Log training metrics every N steps
-    log_every: int = field(default=10)
-
-    # Show tqdm progress bars during train/val loops
-    show_progress: bool = field(
-        default=True,
-        metadata={"help": "Show progress bars for train/val epochs (tqdm)."},
-    )
-
-    # Random seed for reproducibility
-    seed: int = field(default=42)
-
-    # ===== Device Configuration =====
-    cuda_visible_devices: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Comma-separated list of GPU IDs to use (e.g., '0' or '0,1'). "
-            "If None, uses all available GPUs. Set via CUDA_VISIBLE_DEVICES env var."
-        },
-    )
-
-    # Weight for region-specific reconstruction loss
-    # Total loss = global_loss + lambda_region * region_loss
-    lambda_region: float = field(default=1.0)
-
-    # ===== Experiment 2: Joint Adapter-Decoder Training =====
-    train_adapter: bool = field(
-        default=False,
-        metadata={
-            "help": "Whether to unlock adapter for joint training with decoder (Exp2). "
-            "When True, both adapter and decoder are trainable. "
-            "When False (default), only decoder is trainable (Exp1 baseline)."
-        },
-    )
-
-    # ===== Experiment Tracking (Weights & Biases) =====
-    use_wandb: bool = field(
-        default=False,
-        metadata={"help": "Enable Weights & Biases logging (requires wandb installed)."},
-    )
-    wandb_project: str = field(
-        default="Reg2RG-LIT",
-        metadata={"help": "W&B project name."},
-    )
-    wandb_entity: Optional[str] = field(
-        default=None,
-        metadata={"help": "W&B entity/team (optional)."},
-    )
-    wandb_run_name: Optional[str] = field(
-        default=None,
-        metadata={"help": "W&B run name (optional)."},
-    )
-    wandb_mode: str = field(
-        default="online",
-        metadata={"help": "W&B mode: online | offline | disabled."},
-    )
-
-    # ===== Checkpointing =====
-    monitor_metric: str = field(
-        default="reg_cos",
-        metadata={"help": "Validation metric key to monitor for best checkpoints."},
-    )
-    monitor_mode: str = field(
-        default="max",
-        metadata={"help": "max to maximize metric, min to minimize metric."},
-    )
-    save_top_k: int = field(
-        default=3,
-        metadata={"help": "Keep top-k best checkpoints by monitor_metric (0 disables)."},
-    )
-    checkpoint_subdir: str = field(
-        default="checkpoints",
-        metadata={"help": "Subdirectory under output_dir to store checkpoints."},
-    )
-    resume_from_checkpoint: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Path to checkpoint file to resume training from. "
-            "Will restore epoch, global_step, decoder weights, and optimizer state."
-        },
-    )
-
-    # ===== Validation & Early Stopping =====
-    val_check_interval: int = field(
-        default=0,
-        metadata={
-            "help": "Run validation every N training steps (0 = only at epoch end). "
-            "Useful for large datasets to get frequent feedback."
-        },
-    )
-    early_stopping_patience: int = field(
-        default=0,
-        metadata={
-            "help": "Stop training if validation metric doesn't improve for N checks (0 = disabled). "
-            "Works with val_check_interval or epoch-end validation."
-        },
-    )
-
-    # ===== MONAI Persistent Cache Warmup =====
-    precache_splits: str = field(
-        default="none",
-        metadata={
-            "help": "Warm up MONAI PersistentDataset cache before training: none|train|val|both."
-        },
-    )
-    precache_only: bool = field(
-        default=False,
-        metadata={"help": "If True, build the requested cache and exit (no training)."},
-    )
-    precache_max_items: Optional[int] = field(
-        default=None,
-        metadata={"help": "Optional cap on items to warm up (useful for testing)."},
-    )
-    precache_num_workers: int = field(
-        default=0,
-        metadata={
-            "help": "Number of DataLoader workers for cache warmup (0 = single-process). "
-            "Note: warmup workers only speed up caching, not training."
-        },
-    )
-    warmup_priority: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "Process nice priority for cache warmup (-20=highest, 19=lowest). "
-            "Negative values require sudo. Recommended: -5 to -10 for shared systems. "
-            "Leave None to skip priority adjustment."
-        },
-    )
+# NOTE: ModelArguments, DataArguments, TrainArguments are now imported from config
+# See: src/config/arguments.py
 
 
 # ============================================================================
@@ -1270,34 +962,30 @@ def warmup_monai_cache(
 # MAIN TRAINING LOOP
 # ============================================================================
 
-def main() -> None:
+def run_training(
+    model_args: ModelArguments,
+    data_args: DataArguments,
+    train_args: TrainArguments
+) -> None:
     """
-    Main training function: setup, training loop, and evaluation.
+    Run training with the given arguments.
 
-    Overall flow:
-    1. Parse command-line arguments
-    2. Set random seeds for reproducibility
-    3. Load dataset and split into train/val
-    4. Initialize model and load pretrained weights
-    5. Freeze encoder/adapter, train only decoder
-    6. Training loop: forward pass, compute loss, backward pass, optimize
-    7. Log metrics and save results
+    This is the main training function that can be called directly with
+    Arguments objects (from run_experiment.py) or indirectly via main()
+    which parses CLI args first.
+
+    Args:
+        model_args: Model architecture configuration
+        data_args: Dataset paths configuration
+        train_args: Training hyperparameters
     """
 
-    # ===== 1. ARGUMENT PARSING =====
-    # HfArgumentParser: Hugging Face utility for parsing dataclass arguments
-    # Parses command-line args or JSON config files into dataclass instances
-    parser = transformers.HfArgumentParser(
-        (ModelArguments, DataArguments, TrainArguments)
-    )
-    model_args, data_args, train_args = parser.parse_args_into_dataclasses()
-
-    # ===== 2. SET RANDOM SEEDS =====
+    # ===== 1. SET RANDOM SEEDS =====
     # Ensures reproducibility: same seed → same random numbers → same results
     torch.manual_seed(train_args.seed)              # CPU random number generator
     torch.cuda.manual_seed_all(train_args.seed)     # All GPU random number generators
 
-    # ===== 3. DEVICE SETUP =====
+    # ===== 2. DEVICE SETUP =====
     # torch.cuda.is_available(): check if CUDA-capable GPU is available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[device] Using device: {device}")
@@ -1309,7 +997,7 @@ def main() -> None:
     # exist_ok=True: don't raise error if directory already exists
     os.makedirs(train_args.output_dir, exist_ok=True)
 
-    # ===== 3.5. EXPERIMENT TRACKING (W&B) =====
+    # ===== 2.5. EXPERIMENT TRACKING (W&B) =====
     wandb_run = None
     if train_args.use_wandb:
         try:
@@ -2481,6 +2169,30 @@ def main() -> None:
     finally:
         if wandb_run is not None:
             wandb_run.finish()
+
+
+def main() -> None:
+    """
+    CLI entry point: parse arguments and run training.
+
+    This function parses command-line arguments using HfArgumentParser,
+    then calls run_training() with the parsed arguments.
+
+    Usage:
+        python lit_recon_probe.py --adapter_depth 1 --separate_adapters True ...
+
+    For experiment-based running, use run_experiment.py instead:
+        python run_experiment.py exp9
+    """
+    # HfArgumentParser: Hugging Face utility for parsing dataclass arguments
+    # Parses command-line args or JSON config files into dataclass instances
+    parser = transformers.HfArgumentParser(
+        (ModelArguments, DataArguments, TrainArguments)
+    )
+    model_args, data_args, train_args = parser.parse_args_into_dataclasses()
+
+    # Run training with parsed arguments
+    run_training(model_args, data_args, train_args)
 
 
 # ============================================================================

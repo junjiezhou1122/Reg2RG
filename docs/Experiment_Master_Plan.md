@@ -49,6 +49,13 @@
 | **32** | **Adapter + Reconstruction** | 📋 计划中 | 模块化工具添加？ | - |
 | **33** | **External Tools Integration** | 📋 计划中 | 预训练模型作为工具？ | - |
 | **34** | **Component Protocol** | 📋 计划中 | 标准化工具接口？ | - |
+| | | | | |
+| | **=== Data-Driven Training Insights (NEW!) ===** | | | |
+| **35** | **Hardness-Aware Loss Weighting** | 📋 计划中 🔥 | 难学区域给更高权重？ | - |
+| **36** | **Complexity-Aware Token Allocation** | 📋 计划中 | 用学习的复杂度而非体积？ | - |
+| **37** | **Context-Aware Adapter** | 📋 计划中 | 用邻居区域帮助难学区域？ | - |
+| **38** | **Curriculum Learning** | 📋 计划中 | 按难度逐步引入区域？ | - |
+| **39** | **Anatomy-Guided Contrastive** | 📋 计划中 | 解剖邻近性对比学习？ | - |
 
 ---
 
@@ -2481,11 +2488,182 @@ Timeline:
 
 ---
 
-**文档版本**: v5.0
+## 🔬 Data-Driven Training Insights (Exp 35-39)
+
+> **来源**: 基于实际训练数据分析发现的新洞察
+> **核心发现**: "Smaller is Better" 假设只部分成立，学习难度受多因素影响
+
+### 关键数据观察
+
+```
+实际训练数据 (step=60):
+────────────────────────────────────────────────────────────────
+区域         Cos      体积      观察
+────────────────────────────────────────────────────────────────
+Trachea     0.70     3K       最容易学 (简单管状结构)
+Mediastinum 0.63     40K      较容易学
+Breast      0.57     37K      中等
+Esophagus   0.57     3K       中等
+Heart       0.55     56K      中等
+Abdomen     0.49     345K     较难学 (复杂结构)
+Bone        0.46     116K     较难学
+Pleura      0.45     392K     较难学 (大体积)
+Lung        0.44     392K     较难学 (大体积+复杂纹理)
+Thyroid     0.33     2K       最难学 ❌ (最小但最差!)
+────────────────────────────────────────────────────────────────
+
+关键发现:
+  - Trachea (3K) vs Thyroid (2K): 体积相似但cos差距 0.37!
+  - 体积 ≠ 学习难度
+  - 需要更复杂的难度建模
+```
+
+### Experiment 35: Hardness-Aware Loss Weighting
+
+**状态**: 📋 计划中 🔥
+**优先级**: 🥇 最高 (最简单实现，立即可做)
+**论文卖点**: "Hardness-Aware Training for Balanced Medical Image Understanding"
+
+**核心问题**:
+- Thyroid (cos=0.33) 只有 2K 体积，在 batch 中贡献的 loss 很小
+- 结果：难学的区域被"忽视"，永远学不好
+
+**解决方案**:
+```python
+weight = 1.0 + (1 - cos_ema)  # 难学区域权重更高
+# thyroid (cos=0.33) -> weight = 1.67
+# trachea (cos=0.70) -> weight = 1.30
+```
+
+**预期效果**: Thyroid cos: 0.33 -> 0.45+
+
+---
+
+### Experiment 36: Complexity-Aware Token Allocation
+
+**状态**: 📋 计划中
+**优先级**: 🥇 高
+**论文卖点**: "Learning Visual Complexity for Adaptive Medical Image Compression"
+
+**核心问题**:
+- Exp 8 假设: 复杂度 ≈ 体积 → 错误!
+- 数据证明: Thyroid (2K) 比 Lung (392K) 更难学!
+
+**解决方案**:
+- 训练 `ComplexityPredictor` 从视觉特征预测学习难度
+- 用实际 cos 作为 pseudo-label (complexity = 1 - cos)
+- 基于预测的复杂度分配 tokens，而非体积
+
+**预期效果**: Thyroid 获得更多 tokens (32 而非 4)
+
+---
+
+### Experiment 37: Context-Aware Adapter
+
+**状态**: 📋 计划中
+**优先级**: 🥇 高
+**论文卖点**: "Anatomy-Aware Context for Small Organ Representation"
+
+**核心问题**:
+- Thyroid 太小 (2K)，信号太弱，难以独立学习
+- 但 Thyroid 总是在 Trachea 旁边!
+
+**解决方案**:
+- 定义解剖邻居图 (thyroid <-> trachea, esophagus)
+- 用 cross-attention 让 thyroid 利用 trachea 特征作为定位参考
+- 好学的邻居"教"难学的区域
+
+**预期效果**: Thyroid cos: 0.33 -> 0.50+
+
+---
+
+### Experiment 38: Curriculum Learning
+
+**状态**: 📋 计划中
+**优先级**: 🥈 中高
+**论文卖点**: "Curriculum Learning for Multi-Organ Medical Image Understanding"
+
+**核心问题**:
+- 同时训练所有区域 → 简单区域主导梯度
+- 复杂区域永远追不上
+
+**解决方案**:
+```
+Epoch 0-1:  [trachea, mediastinum, breast] (最简单的3个)
+Epoch 2-3:  + esophagus
+Epoch 4-5:  + heart
+...
+Epoch 14+:  + thyroid (所有区域都活跃)
+```
+
+**预期效果**: 简单区域的好表示可以帮助后面加入的难区域
+
+---
+
+### Experiment 39: Anatomy-Guided Contrastive Learning
+
+**状态**: 📋 计划中
+**优先级**: 🥈 中高
+**论文卖点**: "Anatomy-Aware Representation Learning for Medical VLMs"
+
+**核心问题**:
+- 每个区域独立学习，没有利用解剖关系
+- 相邻区域应该有相关的表示!
+
+**解决方案**:
+- 定义解剖邻近图和权重
+- Contrastive loss 让相邻区域表示相似
+- Positive pairs: 同病人相邻区域
+- Negative pairs: 不同病人同区域
+
+**预期效果**: Thyroid 特征被"拉向" Trachea，获得更好的定位线索
+
+---
+
+### 新实验优先级总结
+
+```
+优先级排序 (基于实现难度和预期收益):
+
+1. Exp 35 (Hardness-Aware Loss)     🔥🔥🔥
+   - 实现: 最简单，只改 loss 计算
+   - 收益: 立即改善难学区域
+   - 建议: 本周实现
+
+2. Exp 37 (Context-Aware Adapter)   🔥🔥
+   - 实现: 中等，需要改 adapter 架构
+   - 收益: 解决 thyroid 问题的关键
+   - 建议: 下周实现
+
+3. Exp 36 (Complexity-Aware)        🔥🔥
+   - 实现: 中等，需要训练新网络
+   - 收益: 更准确的 token 分配
+   - 建议: Exp 35 验证后实现
+
+4. Exp 39 (Anatomy Contrastive)     🔥
+   - 实现: 较复杂，需要定义图结构
+   - 收益: 长期改善表示质量
+   - 建议: 作为消融实验
+
+5. Exp 38 (Curriculum Learning)     🔥
+   - 实现: 简单，只改训练流程
+   - 收益: 可能的训练稳定性提升
+   - 建议: 作为对比实验
+```
+
+---
+
+**文档版本**: v6.0
 **创建日期**: 2025-12-26
-**更新日期**: 2025-12-27
+**更新日期**: 2025-12-28
 **主要更新**:
 - 添加 Resolution Problem 解决方案 (Exp 14-18)
 - 添加 Brainstorm 新点子 (Exp 19-23)
 - 添加 Advanced Resolution Ideas (Exp 24-28): 频率分解、自适应Patch、渐进增强、区域特定策略、压缩感知注意力
 - 新增论文方向 5: Resolution-Aware Medical VLM
+- **v6.0 新增**: Data-Driven Training Insights (Exp 35-39) - 基于实际训练数据分析的新实验方向
+  - Exp 35: Hardness-Aware Loss Weighting (难度感知损失加权)
+  - Exp 36: Complexity-Aware Token Allocation (复杂度感知token分配)
+  - Exp 37: Context-Aware Adapter (上下文感知适配器)
+  - Exp 38: Curriculum Learning (课程学习)
+  - Exp 39: Anatomy-Guided Contrastive (解剖引导对比学习)
