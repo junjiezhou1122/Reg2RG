@@ -16,6 +16,10 @@
 #   - Local Decoder:  ~2.4M (4层)
 #   - Total: ~6M (是 Exp 5b 的 2x)
 
+# Change to project root directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
 CUDA_VISIBLE_DEVICES=1 python3 src/lit_recon_probe.py \
     --tokenizer_path /mnt/home/zhoujunjie/models/Llama-2-7b-chat-hf \
     --pretrained_visual_encoder /mnt/home/zhoujunjie/models/Reg2RG/RadFM_vit3d.pth \
