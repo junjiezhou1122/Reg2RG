@@ -160,6 +160,17 @@ class ModelArguments:
         }
     )
 
+    # ===== Experiment 9: Separate Global/Local Adapters =====
+    separate_adapters: bool = field(
+        default=False,
+        metadata={
+            "help": "Use separate adapters for global and local paths (Exp9). "
+            "When True, creates two independent 1-layer adapters: "
+            "global_adapter for whole image, local_adapter for region crops. "
+            "Each has its own decoder. Requires adapter_depth=1."
+        }
+    )
+
 
 @dataclass
 class DataArguments:
@@ -707,6 +718,7 @@ class LITProbeModel(nn.Module):
         decoder_ff_mult: int,   # Decoder FFN multiplier (4)
         decode_mode: str,       # "pre_proj" or "post_proj"
         adapter_depth: int = 6, # Adapter depth (6 for Perceiver, 1 for OneLayer)
+        separate_adapters: bool = False,  # Exp9: separate global/local adapters
     ):
         """Initialize all model components."""
         super().__init__()
@@ -720,6 +732,7 @@ class LITProbeModel(nn.Module):
         self.llm_dim = llm_dim
         self.decode_mode = decode_mode  # Where to decode from
         self.adapter_depth = adapter_depth  # Store for reference
+        self.separate_adapters = separate_adapters  # Exp9: separate paths
 
         # ===== 1. VISION ENCODER (3D ViT) =====
         # Processes 3D CT volumes into token sequences
@@ -738,10 +751,35 @@ class LITProbeModel(nn.Module):
 
         # ===== 2. ADAPTER (Perceiver Resampler or OneLayer) =====
         # Compresses variable-length token sequence to fixed number of latents
-        # Choice depends on adapter_depth:
+        # Choice depends on adapter_depth and separate_adapters:
+        #   - separate_adapters=True (Exp9): Two 1-layer adapters (global + local)
         #   - depth=6: Use PerceiverResampler (baseline, 6 layers of refinement)
         #   - depth=1: Use OneLayerAdapter (minimal-capacity probe, Exp5)
-        if adapter_depth == 1:
+        if separate_adapters:
+            # ===== Exp9: Separate Global/Local Adapters =====
+            if adapter_depth != 1:
+                print(f"[WARN] separate_adapters=True requires adapter_depth=1, got {adapter_depth}")
+                print(f"[INFO] Forcing adapter_depth=1 for separate adapters")
+            print(f"[INFO] 🔬 Using SEPARATE 1-layer adapters (Exp9)")
+            print(f"[INFO]    Global adapter: 32 latents, random init")
+            print(f"[INFO]    Local adapter: 32 latents, random init")
+            self.global_adapter = OneLayerAdapter(
+                dim=vis_dim,
+                num_latents=perceiver_num,
+                heads=8,
+                dim_head=64,
+                ff_mult=4
+            )
+            self.local_adapter = OneLayerAdapter(
+                dim=vis_dim,
+                num_latents=perceiver_num,
+                heads=8,
+                dim_head=64,
+                ff_mult=4
+            )
+            # For compatibility, also set self.adapter to global_adapter
+            self.adapter = self.global_adapter
+        elif adapter_depth == 1:
             print(f"[INFO] 🔬 Using 1-layer adapter (minimal-capacity probe)")
             self.adapter = OneLayerAdapter(
                 dim=vis_dim,
@@ -778,13 +816,34 @@ class LITProbeModel(nn.Module):
         grid = self._patch_grid(256, 256, 64)  # Region volume size
         num_tokens = grid[0] * grid[1] * grid[2]  # Total tokens to reconstruct
 
-        self.decoder = ProbeDecoder(
-            num_tokens=num_tokens,        # Number of tokens to reconstruct
-            dim=vis_dim,                  # Token dimension (must match encoder)
-            depth=decoder_layers,         # Number of decoder layers
-            heads=decoder_heads,          # Number of attention heads
-            ff_mult=decoder_ff_mult,      # FFN expansion factor
-        )
+        if separate_adapters:
+            # ===== Exp9: Separate Global/Local Decoders =====
+            print(f"[INFO]    Global decoder: {decoder_layers} layers")
+            print(f"[INFO]    Local decoder: {decoder_layers} layers")
+            self.global_decoder = ProbeDecoder(
+                num_tokens=num_tokens,
+                dim=vis_dim,
+                depth=decoder_layers,
+                heads=decoder_heads,
+                ff_mult=decoder_ff_mult,
+            )
+            self.local_decoder = ProbeDecoder(
+                num_tokens=num_tokens,
+                dim=vis_dim,
+                depth=decoder_layers,
+                heads=decoder_heads,
+                ff_mult=decoder_ff_mult,
+            )
+            # For compatibility, also set self.decoder to global_decoder
+            self.decoder = self.global_decoder
+        else:
+            self.decoder = ProbeDecoder(
+                num_tokens=num_tokens,        # Number of tokens to reconstruct
+                dim=vis_dim,                  # Token dimension (must match encoder)
+                depth=decoder_layers,         # Number of decoder layers
+                heads=decoder_heads,          # Number of attention heads
+                ff_mult=decoder_ff_mult,      # FFN expansion factor
+            )
 
     @staticmethod  # Method doesn't need access to instance (self)
     def _patch_grid(h: int, w: int, d: int) -> Tuple[int, int, int]:
@@ -833,12 +892,13 @@ class LITProbeModel(nn.Module):
 
         return tokens, grid
 
-    def compress_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+    def compress_tokens(self, tokens: torch.Tensor, is_global: bool = True) -> torch.Tensor:
         """
         Compress token sequence using Perceiver adapter.
 
         Args:
             tokens: Token sequence, shape (batch, num_tokens, dim)
+            is_global: If True, use global adapter; if False, use local adapter (Exp9)
 
         Returns:
             Compressed representation, shape (batch, perceiver_num, dim or llm_dim)
@@ -849,10 +909,16 @@ class LITProbeModel(nn.Module):
         # (b, n, d) → (b, 1, 1, n, d)
         x = tokens.unsqueeze(1).unsqueeze(1)
 
+        # Select adapter based on separate_adapters mode and is_global flag
+        if self.separate_adapters:
+            adapter = self.global_adapter if is_global else self.local_adapter
+        else:
+            adapter = self.adapter
+
         # Perceiver Resampler: compress to fixed number of latent tokens
         # Output: (batch, 1, perceiver_num, dim)
         # squeeze(1): remove media dimension → (batch, perceiver_num, dim)
-        z = self.adapter(x).squeeze(1)
+        z = adapter(x).squeeze(1)
 
         # If decode mode is "post_proj", project to LLM space
         if self.decode_mode == "post_proj":
@@ -861,7 +927,7 @@ class LITProbeModel(nn.Module):
         return z
 
     def decode_tokens(
-        self, memory: torch.Tensor, grid: Tuple[int, int, int]
+        self, memory: torch.Tensor, grid: Tuple[int, int, int], is_global: bool = True
     ) -> torch.Tensor:
         """
         Reconstruct original tokens from compressed representation.
@@ -869,6 +935,7 @@ class LITProbeModel(nn.Module):
         Args:
             memory: Compressed representation, shape (batch, perceiver_num, dim)
             grid: Tuple of patch counts for reconstruction
+            is_global: If True, use global decoder; if False, use local decoder (Exp9)
 
         Returns:
             Reconstructed tokens, shape (batch, h*w*d, vis_dim)
@@ -879,8 +946,14 @@ class LITProbeModel(nn.Module):
         # post_proj: memory is in llm_dim space, project back to vis_dim
         memory = self.mem_proj(memory)
 
+        # Select decoder based on separate_adapters mode and is_global flag
+        if self.separate_adapters:
+            decoder = self.global_decoder if is_global else self.local_decoder
+        else:
+            decoder = self.decoder
+
         # Use decoder to reconstruct tokens via cross-attention
-        return self.decoder(memory, grid, memory.shape[0])
+        return decoder(memory, grid, memory.shape[0])
 
 
 # ============================================================================
@@ -1415,6 +1488,7 @@ def main() -> None:
         decoder_ff_mult=model_args.decoder_ff_mult,  # Decoder FFN multiplier
         decode_mode=model_args.decode_mode,        # "pre_proj" or "post_proj"
         adapter_depth=model_args.adapter_depth,    # Adapter depth (NEW for Exp5)
+        separate_adapters=model_args.separate_adapters,  # Exp9: separate global/local
     )
 
     # ===== 8. LOAD PRETRAINED VISION ENCODER =====
@@ -1479,12 +1553,27 @@ def main() -> None:
     # ===== 11. FREEZE PRETRAINED COMPONENTS =====
     # Exp1 (baseline): Train decoder only, freeze everything else
     # Exp2 (joint training): Train adapter + decoder, freeze encoder + fc
+    # Exp9 (separate adapters): Train both global/local adapters + decoders
     set_requires_grad(model.vision_encoder, False)           # Always freeze ViT ❄️
-    set_requires_grad(model.adapter, train_args.train_adapter)  # Unlock if Exp2 🔥/❄️
     set_requires_grad(model.fc, False)                       # Always freeze projection ❄️
-    set_requires_grad(model.decoder, True)                   # Always train decoder 🔥
 
-    if train_args.train_adapter:
+    if model_args.separate_adapters:
+        # Exp9: Handle both adapters and both decoders
+        set_requires_grad(model.global_adapter, train_args.train_adapter)
+        set_requires_grad(model.local_adapter, train_args.train_adapter)
+        set_requires_grad(model.global_decoder, True)
+        set_requires_grad(model.local_decoder, True)
+    else:
+        set_requires_grad(model.adapter, train_args.train_adapter)  # Unlock if Exp2 🔥/❄️
+        set_requires_grad(model.decoder, True)                   # Always train decoder 🔥
+
+    if model_args.separate_adapters:
+        print("[INFO] 🔬 Exp9 Mode: Separate Global/Local Adapters + Decoders")
+        if train_args.train_adapter:
+            print("[INFO] 🔥 Training BOTH adapters + BOTH decoders")
+        else:
+            print("[INFO] ❄️ Adapters frozen, training BOTH decoders only")
+    elif train_args.train_adapter:
         print("[INFO] 🔥 Exp2 Mode: Training BOTH adapter + decoder (joint training)")
     else:
         print("[INFO] ❄️ Exp1 Mode: Training decoder ONLY (adapter frozen)")
@@ -1494,7 +1583,38 @@ def main() -> None:
     # AdamW: Adam optimizer with weight decay (L2 regularization)
     # Exp1: Only decoder parameters
     # Exp2: Adapter + decoder parameters (joint training)
-    if train_args.train_adapter:
+    # Exp9: Both adapters + both decoders
+    if model_args.separate_adapters:
+        # Exp9: Collect parameters from both adapters and both decoders
+        decoder_params = (
+            list(model.global_decoder.parameters()) +
+            list(model.local_decoder.parameters())
+        )
+        num_global_decoder = sum(p.numel() for p in model.global_decoder.parameters())
+        num_local_decoder = sum(p.numel() for p in model.local_decoder.parameters())
+
+        if train_args.train_adapter:
+            adapter_params = (
+                list(model.global_adapter.parameters()) +
+                list(model.local_adapter.parameters())
+            )
+            trainable_params = adapter_params + decoder_params
+            num_global_adapter = sum(p.numel() for p in model.global_adapter.parameters())
+            num_local_adapter = sum(p.numel() for p in model.local_adapter.parameters())
+            print(f"[INFO] 📊 Exp9 Parameter Breakdown:")
+            print(f"[INFO]    Global Adapter: {num_global_adapter:,} params")
+            print(f"[INFO]    Local Adapter:  {num_local_adapter:,} params")
+            print(f"[INFO]    Global Decoder: {num_global_decoder:,} params")
+            print(f"[INFO]    Local Decoder:  {num_local_decoder:,} params")
+            total_params = num_global_adapter + num_local_adapter + num_global_decoder + num_local_decoder
+            print(f"[INFO]    Total Trainable: {total_params:,} params")
+        else:
+            trainable_params = decoder_params
+            print(f"[INFO] 📊 Exp9 Parameter Breakdown (adapters frozen):")
+            print(f"[INFO]    Global Decoder: {num_global_decoder:,} params")
+            print(f"[INFO]    Local Decoder:  {num_local_decoder:,} params")
+            print(f"[INFO]    Total Trainable: {num_global_decoder + num_local_decoder:,} params")
+    elif train_args.train_adapter:
         # Joint training: optimize both adapter and decoder
         trainable_params = list(model.adapter.parameters()) + list(model.decoder.parameters())
         num_adapter_params = sum(p.numel() for p in model.adapter.parameters())
@@ -1533,7 +1653,15 @@ def main() -> None:
         checkpoint = torch.load(ckpt_path, map_location=device)
 
         # Restore decoder weights
-        if "decoder_state_dict" in checkpoint:
+        if model_args.separate_adapters:
+            # Exp9: Load separate decoders
+            if "global_decoder_state_dict" in checkpoint:
+                model.global_decoder.load_state_dict(checkpoint["global_decoder_state_dict"])
+                print(f"[resume] Restored global decoder weights")
+            if "local_decoder_state_dict" in checkpoint:
+                model.local_decoder.load_state_dict(checkpoint["local_decoder_state_dict"])
+                print(f"[resume] Restored local decoder weights")
+        elif "decoder_state_dict" in checkpoint:
             model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
             print(f"[resume] Restored decoder weights")
         elif "model_state_dict" in checkpoint:
@@ -1541,10 +1669,19 @@ def main() -> None:
             model.load_state_dict(checkpoint["model_state_dict"])
             print(f"[resume] Restored full model weights")
 
-        # Restore adapter weights if training adapter (Exp2)
-        if train_args.train_adapter and "adapter_state_dict" in checkpoint:
-            model.adapter.load_state_dict(checkpoint["adapter_state_dict"])
-            print(f"[resume] Restored adapter weights (Exp2 joint training)")
+        # Restore adapter weights if training adapter (Exp2/Exp9)
+        if train_args.train_adapter:
+            if model_args.separate_adapters:
+                # Exp9: Load separate adapters
+                if "global_adapter_state_dict" in checkpoint:
+                    model.global_adapter.load_state_dict(checkpoint["global_adapter_state_dict"])
+                    print(f"[resume] Restored global adapter weights (Exp9)")
+                if "local_adapter_state_dict" in checkpoint:
+                    model.local_adapter.load_state_dict(checkpoint["local_adapter_state_dict"])
+                    print(f"[resume] Restored local adapter weights (Exp9)")
+            elif "adapter_state_dict" in checkpoint:
+                model.adapter.load_state_dict(checkpoint["adapter_state_dict"])
+                print(f"[resume] Restored adapter weights (Exp2 joint training)")
 
         # Restore optimizer state
         if "optimizer_state_dict" in checkpoint:
@@ -1594,16 +1731,26 @@ def main() -> None:
             "epoch": current_epoch,
             "global_step": global_step,
             "reason": reason,
-            "decoder_state_dict": model.decoder.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "model_args": vars(model_args),
             "data_args": vars(data_args),
             "train_args": vars(train_args),
         }
 
-        # Save adapter weights if we're training it (Exp2)
+        # Save decoder weights (handle separate adapters for Exp9)
+        if model_args.separate_adapters:
+            ckpt_dict["global_decoder_state_dict"] = model.global_decoder.state_dict()
+            ckpt_dict["local_decoder_state_dict"] = model.local_decoder.state_dict()
+        else:
+            ckpt_dict["decoder_state_dict"] = model.decoder.state_dict()
+
+        # Save adapter weights if we're training it (Exp2/Exp9)
         if train_args.train_adapter:
-            ckpt_dict["adapter_state_dict"] = model.adapter.state_dict()
+            if model_args.separate_adapters:
+                ckpt_dict["global_adapter_state_dict"] = model.global_adapter.state_dict()
+                ckpt_dict["local_adapter_state_dict"] = model.local_adapter.state_dict()
+            else:
+                ckpt_dict["adapter_state_dict"] = model.adapter.state_dict()
 
         torch.save(ckpt_dict, ckpt_path)
         print(f"[ckpt] interrupt checkpoint saved: {ckpt_path}")
@@ -1736,11 +1883,11 @@ def main() -> None:
 
             # Compress: tokens → compressed representation
             # Gradients computed here in training mode (though adapter is frozen)
-            z_g = model.compress_tokens(x_g)
+            z_g = model.compress_tokens(x_g, is_global=True)
 
             # Decode: compressed → reconstructed tokens
             # Gradients computed here (decoder is trainable)
-            x_hat_g = model.decode_tokens(z_g, grid)
+            x_hat_g = model.decode_tokens(z_g, grid, is_global=True)
 
             # Calculate reconstruction loss
             loss_g, mse_g, cos_g, top1_g = recon_loss(x_hat_g, x_g, ln)
@@ -1782,8 +1929,9 @@ def main() -> None:
                 with torch.no_grad():
                     x_r, reg_grid = model.encode_tokens(vol[present])
 
-                z_r = model.compress_tokens(x_r)
-                x_hat_r = model.decode_tokens(z_r, reg_grid)
+                # Exp9: Use local adapter/decoder for regions (is_global=False)
+                z_r = model.compress_tokens(x_r, is_global=False)
+                x_hat_r = model.decode_tokens(z_r, reg_grid, is_global=False)
 
                 # Calculate reconstruction loss for this region
                 loss_r, mse_r, cos_r, top1_r = recon_loss(x_hat_r, x_r, ln)
