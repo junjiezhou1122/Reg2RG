@@ -468,6 +468,11 @@ class RadGenomeDataset_Train(RobustPersistentDataset):
 
         mask_img_tensors: Dict[str, torch.Tensor] = {"image": global_img}
         mask_tensors: Dict[str, torch.Tensor] = {}
+        # Track original bbox sizes for compression ratio analysis
+        # compression_ratio > 1 means info was compressed (lost detail)
+        # compression_ratio < 1 means info was expanded (no loss, just interpolation)
+        bbox_sizes: Dict[str, Dict[str, Any]] = {}
+        target_voxels = self.target_size[0] * self.target_size[1] * self.target_size[2]  # 256*256*64
 
         # Build region-specific tensors from cached (img_hu, seg) to avoid re-loading NIfTI.
         # We threshold seg to a binary mask because resizing may introduce interpolation.
@@ -479,6 +484,22 @@ class RadGenomeDataset_Train(RobustPersistentDataset):
                 continue
 
             h0, h1, w0, w1, d0, d1 = self._mask_bbox(mask)
+
+            # Calculate original bbox dimensions and compression ratio
+            bbox_h = h1 - h0 + 1
+            bbox_w = w1 - w0 + 1
+            bbox_d = d1 - d0 + 1
+            original_bbox_voxels = bbox_h * bbox_w * bbox_d
+            compression_ratio = original_bbox_voxels / target_voxels
+
+            # Store bbox info for this region
+            bbox_sizes[key] = {
+                "original_shape": (bbox_h, bbox_w, bbox_d),
+                "original_voxels": original_bbox_voxels,
+                "target_voxels": target_voxels,
+                "compression_ratio": compression_ratio,  # >1 = compressed (info loss), <1 = expanded
+            }
+
             img_crop = img_hu[:, h0 : h1 + 1, w0 : w1 + 1, d0 : d1 + 1].clone()
             mask_crop = mask[h0 : h1 + 1, w0 : w1 + 1, d0 : d1 + 1]
 
@@ -543,6 +564,7 @@ class RadGenomeDataset_Train(RobustPersistentDataset):
         return {'lang_x': text_input,
                 'vision_x': mask_img_tensors,
                 'mask_x': mask_tensors,
+                'bbox_sizes': bbox_sizes,  # Original bbox dimensions for compression ratio analysis
                 'region2area': region2area,
                 'attention_mask': attention_mask,
                 'label': label

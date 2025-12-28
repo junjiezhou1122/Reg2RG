@@ -395,21 +395,25 @@ class LITDataCollator:
             instances: List of dictionaries, each containing:
                 - vision_x: Dict mapping region names to CT volume tensors
                 - mask_x: Dict mapping region names to binary mask tensors
+                - bbox_sizes: Dict mapping region names to bbox size info
                 - region2area: Metadata about regions (not used in this function)
 
         Returns:
             Batched dictionary with keys:
                 - vision_x: Dict of batched region volumes
                 - mask_x: Dict of batched region masks
+                - bbox_sizes: List of per-sample bbox size dicts
                 - region2area: List of metadata
         """
 
-        # Extract the three components from each instance
-        # tuple() is used to unpack a generator into separate lists
+        # Extract the components from each instance
         vision_xs, mask_xs, region2areas = tuple(
             [instance[key] for instance in instances]  # List comprehension
             for key in ("vision_x", "mask_x", "region2area")  # For each key
         )
+
+        # Extract bbox_sizes if available (for compression ratio analysis)
+        bbox_sizes_list = [instance.get("bbox_sizes", {}) for instance in instances]
 
         # Initialize temporary storage for each anatomical region
         # Dict comprehension: {key: value for key in iterable}
@@ -475,7 +479,12 @@ class LITDataCollator:
         }
 
         # Return batched data as dictionary
-        return dict(vision_x=vision_xs, mask_x=mask_xs, region2area=region2areas)
+        return dict(
+            vision_x=vision_xs,
+            mask_x=mask_xs,
+            bbox_sizes=bbox_sizes_list,  # List of dicts for compression ratio analysis
+            region2area=region2areas
+        )
 
 
 # ============================================================================
@@ -1663,6 +1672,25 @@ def main() -> None:
             "reg_count": 0,    # Number of region samples
         }
 
+        # ===== REGION-LEVEL STATISTICS (for size-cos correlation analysis) =====
+        # Track per-region metrics to analyze relationship between region size and reconstruction quality
+        region_stats = {
+            region_name: {
+                "cos_values": [],      # List of cosine similarity values per step
+                "mse_values": [],      # List of MSE values per step
+                "top1_values": [],     # List of top-1% error values per step
+                "volume_sizes": [],    # List of mask-based volume sizes (in voxels)
+                "compression_ratios": [],  # List of compression ratios (original_bbox / target)
+                "cos_sum": 0.0,        # Running sum for epoch average
+                "mse_sum": 0.0,
+                "top1_sum": 0.0,
+                "size_sum": 0,         # Running sum of volume sizes
+                "compression_ratio_sum": 0.0,  # Running sum of compression ratios
+                "count": 0,            # Number of samples for this region
+            }
+            for region_name in REGIONS
+        }
+
         # Gradient accumulation counter
         step_in_accum = 0
 
@@ -1690,6 +1718,10 @@ def main() -> None:
             # Move batch to GPU
             # Dict comprehension: transfer each tensor to device
             vision_x = {k: v.to(device) for k, v in batch["vision_x"].items()}
+            # Also move masks to GPU for accurate region size calculation
+            mask_x = {k: v.to(device) for k, v in batch["mask_x"].items()}
+            # Extract bbox_sizes for compression ratio analysis (list of dicts, one per sample)
+            bbox_sizes_batch = batch.get("bbox_sizes", [{}] * len(batch["vision_x"]["image"]))
 
             # Initialize batch loss
             loss_total = 0.0
@@ -1754,7 +1786,50 @@ def main() -> None:
                 x_hat_r = model.decode_tokens(z_r, reg_grid)
 
                 # Calculate reconstruction loss for this region
-                loss_r, _, cos_r, top1_r = recon_loss(x_hat_r, x_r, ln)
+                loss_r, mse_r, cos_r, top1_r = recon_loss(x_hat_r, x_r, ln)
+
+                # ===== MASK-BASED SIZE CALCULATION =====
+                # Use binary mask to get accurate anatomical region size (in voxels)
+                # This is more accurate than bounding box size which includes padding
+                if key in mask_x:
+                    region_mask = mask_x[key][present]
+                    # Sum of non-zero voxels across all spatial dimensions
+                    # shape: (B, 1, H, W, D) -> scalar after sum
+                    mask_size = int((region_mask > 0).sum().item())
+                else:
+                    # Fallback: use non-zero volume size if mask unavailable
+                    mask_size = int((vol[present].abs() > 1e-6).sum().item())
+
+                # ===== COMPRESSION RATIO FROM BBOX_SIZES =====
+                # Extract average compression ratio for this region from batch
+                # compression_ratio > 1 means original was larger (info compressed/lost)
+                # compression_ratio < 1 means original was smaller (info expanded)
+                compression_ratios_for_region = []
+                present_indices = present.nonzero(as_tuple=True)[0].tolist()
+                for idx in present_indices:
+                    if idx < len(bbox_sizes_batch) and key in bbox_sizes_batch[idx]:
+                        compression_ratios_for_region.append(
+                            bbox_sizes_batch[idx][key].get("compression_ratio", 1.0)
+                        )
+                avg_compression_ratio = (
+                    sum(compression_ratios_for_region) / len(compression_ratios_for_region)
+                    if compression_ratios_for_region else 1.0
+                )
+
+                # ===== RECORD PER-REGION STATISTICS =====
+                # Store metrics for this region (for correlation analysis)
+                if key in region_stats:
+                    region_stats[key]["cos_values"].append(cos_r)
+                    region_stats[key]["mse_values"].append(mse_r)
+                    region_stats[key]["top1_values"].append(top1_r)
+                    region_stats[key]["volume_sizes"].append(mask_size)
+                    region_stats[key]["compression_ratios"].append(avg_compression_ratio)
+                    region_stats[key]["cos_sum"] += cos_r
+                    region_stats[key]["mse_sum"] += mse_r
+                    region_stats[key]["top1_sum"] += top1_r
+                    region_stats[key]["size_sum"] += mask_size
+                    region_stats[key]["compression_ratio_sum"] += avg_compression_ratio
+                    region_stats[key]["count"] += 1
 
                 # Accumulate region metrics
                 reg_losses.append(loss_r)
@@ -1829,33 +1904,53 @@ def main() -> None:
                     f"[train] step={step+1} loss={loss_total.item():.4f} "
                     f"cos={cos_g:.4f} reg_cos={agg['reg_cos'] / max(1, agg['reg_count']):.4f}"
                 )
+
+                # ===== STEP-LEVEL REGION DETAILS =====
+                # Print per-region metrics for debugging and analysis
+                region_detail_parts = []
+                for rname in REGIONS:
+                    rs = region_stats[rname]
+                    if rs["count"] > 0:
+                        avg_cos = rs["cos_sum"] / rs["count"]
+                        avg_size_k = (rs["size_sum"] / rs["count"]) / 1000  # Convert to K voxels
+                        region_detail_parts.append(f"{rname[:4]}:{avg_cos:.2f}@{avg_size_k:.0f}K")
+                if region_detail_parts:
+                    print(f"    [regions] {' | '.join(region_detail_parts)}")
+
                 if wandb_run is not None:
                     # Calculate current batch reg_cos (instant value)
                     current_reg_cos = sum(reg_cos) / len(reg_cos) if reg_cos else 0.0
 
-                    wandb_run.log(
-                        {
-                            # Instant values (current batch) - for observing training dynamics
-                            "train/loss_step": float(loss_total.item()),
-                            "train/mse_step": float(mse_g),
-                            "train/cos_step": float(cos_g),
-                            "train/top1_step": float(top1_g),
-                            "train/reg_cos_step": float(current_reg_cos),
-                            "train/reg_top1_step": float(sum(reg_top1) / len(reg_top1) if reg_top1 else 0.0),
+                    wandb_log_dict = {
+                        # Instant values (current batch) - for observing training dynamics
+                        "train/loss_step": float(loss_total.item()),
+                        "train/mse_step": float(mse_g),
+                        "train/cos_step": float(cos_g),
+                        "train/top1_step": float(top1_g),
+                        "train/reg_cos_step": float(current_reg_cos),
+                        "train/reg_top1_step": float(sum(reg_top1) / len(reg_top1) if reg_top1 else 0.0),
 
-                            # Cumulative averages (from epoch start) - for smooth trends
-                            "train/loss_running": float(agg["loss"] / max(1, agg["count"])),
-                            "train/mse_running": float(agg["mse"] / max(1, agg["count"])),
-                            "train/cos_running": float(agg["cos"] / max(1, agg["count"])),
-                            "train/top1_running": float(agg["top1"] / max(1, agg["count"])),
-                            "train/reg_cos_running": float(agg["reg_cos"] / max(1, agg["reg_count"])),
-                            "train/reg_top1_running": float(agg["reg_top1"] / max(1, agg["reg_count"])),
+                        # Cumulative averages (from epoch start) - for smooth trends
+                        "train/loss_running": float(agg["loss"] / max(1, agg["count"])),
+                        "train/mse_running": float(agg["mse"] / max(1, agg["count"])),
+                        "train/cos_running": float(agg["cos"] / max(1, agg["count"])),
+                        "train/top1_running": float(agg["top1"] / max(1, agg["count"])),
+                        "train/reg_cos_running": float(agg["reg_cos"] / max(1, agg["reg_count"])),
+                        "train/reg_top1_running": float(agg["reg_top1"] / max(1, agg["reg_count"])),
 
-                            # Learning rate
-                            "train/lr": float(optimizer.param_groups[0]["lr"]),
-                        },
-                        step=global_step,
-                    )
+                        # Learning rate
+                        "train/lr": float(optimizer.param_groups[0]["lr"]),
+                    }
+
+                    # ===== PER-REGION WANDB LOGGING =====
+                    # Log running average for each region (for size-cos analysis)
+                    for rname in REGIONS:
+                        rs = region_stats[rname]
+                        if rs["count"] > 0:
+                            wandb_log_dict[f"train/region_{rname}_cos"] = float(rs["cos_sum"] / rs["count"])
+                            wandb_log_dict[f"train/region_{rname}_size"] = float(rs["size_sum"] / rs["count"])
+
+                    wandb_run.log(wandb_log_dict, step=global_step)
 
             if train_args.show_progress and tqdm is not None:
                 running = {
@@ -1882,6 +1977,95 @@ def main() -> None:
         denom = max(1, agg["count"])         # Prevent division by zero
         reg_denom = max(1, agg["reg_count"])
 
+        # ===== EPOCH-LEVEL REGION STATISTICS SUMMARY =====
+        # Compute and print per-region epoch averages for size-cos analysis
+        print(f"\n{'='*80}")
+        print(f"[{split}] EPOCH {epoch_idx} REGION STATISTICS")
+        print(f"{'='*80}")
+        print(f"{'Region':<20} {'Cos':>8} {'MSE':>8} {'Top1':>8} {'Size(K)':>10} {'Comp.Ratio':>12} {'Count':>6}")
+        print("-" * 80)
+
+        # Collect region-level epoch averages for correlation analysis
+        region_epoch_summary = {}
+        sizes_for_corr = []
+        cos_for_corr = []
+        compression_ratios_for_corr = []
+
+        for rname in REGIONS:
+            rs = region_stats[rname]
+            if rs["count"] > 0:
+                avg_cos = rs["cos_sum"] / rs["count"]
+                avg_mse = rs["mse_sum"] / rs["count"]
+                avg_top1 = rs["top1_sum"] / rs["count"]
+                avg_size = rs["size_sum"] / rs["count"]
+                avg_size_k = avg_size / 1000  # Convert to K voxels
+                avg_compression_ratio = rs["compression_ratio_sum"] / rs["count"]
+
+                region_epoch_summary[rname] = {
+                    "cos": avg_cos,
+                    "mse": avg_mse,
+                    "top1": avg_top1,
+                    "avg_size": avg_size,
+                    "avg_compression_ratio": avg_compression_ratio,
+                    "count": rs["count"],
+                }
+
+                # Collect for correlation analysis
+                sizes_for_corr.append(avg_size)
+                cos_for_corr.append(avg_cos)
+                compression_ratios_for_corr.append(avg_compression_ratio)
+
+                # Print with compression ratio indicator
+                # >1 = compressed (🔻 info loss), <1 = expanded (🔺 no loss)
+                ratio_indicator = "🔻" if avg_compression_ratio > 1.0 else "🔺"
+                print(f"{rname:<20} {avg_cos:>8.4f} {avg_mse:>8.4f} {avg_top1:>8.4f} {avg_size_k:>10.1f} {avg_compression_ratio:>10.2f}x{ratio_indicator} {rs['count']:>6}")
+            else:
+                print(f"{rname:<20} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>10} {'N/A':>12} {0:>6}")
+
+        # ===== COMPRESSION RATIO-COS CORRELATION ANALYSIS =====
+        # This is the key analysis: does compression ratio affect reconstruction quality?
+        if len(compression_ratios_for_corr) >= 3:  # Need at least 3 points
+            import numpy as np
+            ratios_arr = np.array(compression_ratios_for_corr)
+            cos_arr = np.array(cos_for_corr)
+            sizes_arr = np.array(sizes_for_corr)
+
+            # Helper function for Pearson correlation
+            def pearson_corr(x, y):
+                mean_x, mean_y = x.mean(), y.mean()
+                numerator = ((x - mean_x) * (y - mean_y)).sum()
+                denom_x = np.sqrt(((x - mean_x) ** 2).sum())
+                denom_y = np.sqrt(((y - mean_y) ** 2).sum())
+                if denom_x > 0 and denom_y > 0:
+                    return numerator / (denom_x * denom_y)
+                return 0.0
+
+            # Correlation 1: Compression Ratio vs Cosine
+            r_ratio_cos = pearson_corr(ratios_arr, cos_arr)
+
+            # Correlation 2: Size vs Cosine (original analysis)
+            r_size_cos = pearson_corr(sizes_arr, cos_arr)
+
+            print("-" * 80)
+            print(f"📊 CORRELATION ANALYSIS:")
+            print(f"   Compression Ratio vs Cos (Pearson r): {r_ratio_cos:+.4f}")
+            if r_ratio_cos < -0.3:
+                print(f"      → ⚠️  Higher compression = WORSE reconstruction (info loss confirmed!)")
+            elif r_ratio_cos > 0.3:
+                print(f"      → Higher compression = better reconstruction (unexpected)")
+            else:
+                print(f"      → No strong correlation")
+
+            print(f"   Size vs Cos (Pearson r): {r_size_cos:+.4f}")
+            if r_size_cos > 0.3:
+                print(f"      → Larger regions easier to reconstruct")
+            elif r_size_cos < -0.3:
+                print(f"      → Smaller regions easier to reconstruct (denser info)")
+            else:
+                print(f"      → No strong correlation")
+
+        print(f"{'='*80}\n")
+
         return {
             "loss": agg["loss"] / denom,
             "mse": agg["mse"] / denom,
@@ -1889,6 +2073,7 @@ def main() -> None:
             "top1": agg["top1"] / denom,
             "reg_cos": agg["reg_cos"] / reg_denom,
             "reg_top1": agg["reg_top1"] / reg_denom,
+            "region_stats": region_epoch_summary,  # Add per-region statistics
         }
 
     # ===== 15. METRICS FILE INITIALIZATION =====
@@ -1901,6 +2086,12 @@ def main() -> None:
         f.write(
             "epoch,split,loss,mse,cos,top1,reg_cos,reg_top1,decode_mode\n"
         )
+
+    # ===== 15.1. REGION-LEVEL METRICS CSV =====
+    # Create CSV file for per-region metrics (for size-cos correlation analysis)
+    region_metrics_path = os.path.join(train_args.output_dir, "region_metrics.csv")
+    with open(region_metrics_path, "w", encoding="utf-8") as f:
+        f.write("epoch,split,region,cos,mse,top1,avg_size,compression_ratio,count\n")
 
     # ===== 15.5. CHECKPOINT MANAGER (TOP-K BEST) =====
     best_checkpoints: List[Tuple[float, int, str]] = []
@@ -2111,6 +2302,31 @@ def main() -> None:
                     f"{val_metrics['top1']:.6f},{val_metrics['reg_cos']:.6f},"
                     f"{val_metrics['reg_top1']:.6f},{model_args.decode_mode}\n"
                 )
+
+            # ===== 17.1. LOG REGION-LEVEL METRICS TO CSV =====
+            # Write per-region statistics for size-cos correlation analysis
+            with open(region_metrics_path, "a", encoding="utf-8") as f:
+                # Write training region metrics
+                if "region_stats" in train_metrics:
+                    for rname, rstats in train_metrics["region_stats"].items():
+                        f.write(
+                            f"{epoch},train,{rname},"
+                            f"{rstats['cos']:.6f},{rstats['mse']:.6f},"
+                            f"{rstats['top1']:.6f},{rstats['avg_size']:.1f},"
+                            f"{rstats.get('avg_compression_ratio', 1.0):.4f},"
+                            f"{rstats['count']}\n"
+                        )
+
+                # Write validation region metrics
+                if "region_stats" in val_metrics:
+                    for rname, rstats in val_metrics["region_stats"].items():
+                        f.write(
+                            f"{epoch},val,{rname},"
+                            f"{rstats['cos']:.6f},{rstats['mse']:.6f},"
+                            f"{rstats['top1']:.6f},{rstats['avg_size']:.1f},"
+                            f"{rstats.get('avg_compression_ratio', 1.0):.4f},"
+                            f"{rstats['count']}\n"
+                        )
 
     except (KeyboardInterrupt, SystemExit):
         save_interrupt_checkpoint(stop_reason)
